@@ -121,7 +121,7 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // Ultra-Fast Static Assets Serving with Cache-Control and HTTP Byte-Range Streaming
-app.use(['/uploads', '/api/uploads'], express.static(path.join(__dirname, 'uploads'), {
+const staticUploadsMiddleware = express.static(path.join(__dirname, 'uploads'), {
   maxAge: '7d',
   immutable: true,
   setHeaders: (res, filePath) => {
@@ -132,7 +132,9 @@ app.use(['/uploads', '/api/uploads'], express.static(path.join(__dirname, 'uploa
       res.setHeader('Cache-Control', 'public, max-age=86400');
     }
   }
-}));
+});
+app.use('/uploads', staticUploadsMiddleware);
+app.use('/api/uploads', staticUploadsMiddleware);
 
 // Middleware placeholder for DB connection status check
 app.use((req, res, next) => {
