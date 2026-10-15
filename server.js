@@ -136,6 +136,18 @@ const staticUploadsMiddleware = express.static(path.join(__dirname, 'uploads'), 
 app.use('/uploads', staticUploadsMiddleware);
 app.use('/api/uploads', staticUploadsMiddleware);
 
+// Guaranteed Static Fallback: sendFile or redirect to GitHub CDN
+app.get(['/uploads/*', '/api/uploads/*'], (req, res, next) => {
+  const relPath = req.params[0];
+  if (!relPath) return next();
+  const filePath = path.join(__dirname, 'uploads', relPath);
+  const fs = require('fs');
+  if (fs.existsSync(filePath)) {
+    return res.sendFile(filePath);
+  }
+  return res.redirect(`https://raw.githubusercontent.com/lodhi36/ride-hub-backend/main/uploads/${relPath}`);
+});
+
 // Middleware placeholder for DB connection status check
 app.use((req, res, next) => {
   next();
