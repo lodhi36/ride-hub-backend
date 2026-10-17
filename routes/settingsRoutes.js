@@ -118,7 +118,19 @@ router.get('/splash', async (req, res) => {
     if (!settings) {
       settings = await AdminSettings.create({ splashScreen: DEFAULT_SPLASH_SCREEN });
     }
-    const splash = (settings && settings.splashScreen) ? settings.splashScreen : DEFAULT_SPLASH_SCREEN;
+    const splash = (settings && settings.splashScreen) ? settings.splashScreen.toObject() : { ...DEFAULT_SPLASH_SCREEN };
+
+    // If splashImage is empty in settings, check ScreenMedia SPLASH_SCREEN
+    if (!splash.splashImage) {
+      try {
+        const ScreenMedia = require('../models/ScreenMedia');
+        const screenDoc = await ScreenMedia.findOne({ screenId: 'SPLASH_SCREEN' });
+        if (screenDoc && (screenDoc.imageUrl || screenDoc.mediaUrl)) {
+          splash.splashImage = screenDoc.imageUrl || screenDoc.mediaUrl;
+        }
+      } catch (_) {}
+    }
+
     res.json({ success: true, splashScreen: splash });
   } catch (error) {
     res.status(200).json({ success: true, splashScreen: DEFAULT_SPLASH_SCREEN });
@@ -189,14 +201,37 @@ router.all('/splash', splashUpload, compressImage, async (req, res, next) => {
     }
 
     // Direct image URL overrides if provided
-    if (b.splashImageUrl !== undefined) updatedSplash.splashImage = b.splashImageUrl;
-    if (b.customerImageUrl !== undefined) updatedSplash.customer.image = b.customerImageUrl;
-    if (b.supplierImageUrl !== undefined) updatedSplash.supplier.image = b.supplierImageUrl;
-    if (b.deliveryImageUrl !== undefined) updatedSplash.delivery.image = b.deliveryImageUrl;
+    if (b.splashImageUrl !== undefined && b.splashImageUrl.trim() !== '') updatedSplash.splashImage = b.splashImageUrl;
+    if (b.customerImageUrl !== undefined && b.customerImageUrl.trim() !== '') updatedSplash.customer.image = b.customerImageUrl;
+    if (b.supplierImageUrl !== undefined && b.supplierImageUrl.trim() !== '') updatedSplash.supplier.image = b.supplierImageUrl;
+    if (b.deliveryImageUrl !== undefined && b.deliveryImageUrl.trim() !== '') updatedSplash.delivery.image = b.deliveryImageUrl;
+
+    // Explicit remove flag
+    if (b.removeSplashImage === true || b.removeSplashImage === 'true') {
+      updatedSplash.splashImage = '';
+    } else {
+      // Preserve existing image permanently if no replacement was provided
+      if (!updatedSplash.splashImage && currentSplash.splashImage) {
+        updatedSplash.splashImage = currentSplash.splashImage;
+      }
+    }
 
     updatedSplash.updatedAt = new Date();
     settings.splashScreen = updatedSplash;
     await settings.save();
+
+    // Two-way sync: Update ScreenMedia SPLASH_SCREEN document as well
+    try {
+      const ScreenMedia = require('../models/ScreenMedia');
+      let screenDoc = await ScreenMedia.findOne({ screenId: 'SPLASH_SCREEN' });
+      if (screenDoc && updatedSplash.splashImage) {
+        screenDoc.imageUrl = updatedSplash.splashImage;
+        screenDoc.mediaUrl = updatedSplash.splashImage;
+        screenDoc.version = (screenDoc.version || 1) + 1;
+        screenDoc.publishedAt = new Date();
+        await screenDoc.save();
+      }
+    } catch (_) {}
 
     // Broadcast socket event
     const io = req.app.get('io') || global.io;

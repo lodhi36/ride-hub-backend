@@ -379,6 +379,23 @@ router.post('/:screenId/upload', upload.single('mediaFile'), async (req, res) =>
 
     await screen.save();
 
+    // If uploading for SPLASH_SCREEN, synchronize with AdminSettings as well
+    if (sid === 'SPLASH_SCREEN' && mediaType === 'IMAGE') {
+      try {
+        const AdminSettings = require('../models/AdminSettings');
+        let settings = await AdminSettings.findOne();
+        if (!settings) settings = await AdminSettings.create({});
+        if (!settings.splashScreen) settings.splashScreen = {};
+        settings.splashScreen.splashImage = mediaUrl;
+        settings.splashScreen.updatedAt = new Date();
+        await settings.save();
+        const io = req.app.get('io') || global.io;
+        if (io) io.emit('splash_screen_updated', settings.splashScreen);
+      } catch (err) {
+        console.warn('Splash sync note:', err.message);
+      }
+    }
+
     // Broadcast socket event for real-time live synchronization
     const io = req.app.get('io') || global.io;
     if (io) {
