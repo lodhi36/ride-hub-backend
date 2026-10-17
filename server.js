@@ -468,18 +468,19 @@ app.use('/api/likes', require('./routes/likeRoutes'));
 app.use('/api/chats', require('./routes/chatRoutes'));
 app.use('/api/messages', require('./routes/messageRoutes'));
 app.use('/api/notifications', require('./routes/notificationRoutes'));
-app.use('/api/settings', require('./routes/settingsRoutes'));
+app.use(['/api/settings', '/settings'], require('./routes/settingsRoutes'));
 app.use('/api/verification', require('./routes/verificationRoutes'));
 app.use('/api/payments', require('./routes/paymentRoutes'));
 app.use('/api/live', require('./routes/liveRoutes'));
 app.use('/api/admin', require('./routes/adminRoutes'));
-app.use('/api/banner', require('./routes/bannerRoutes'));
-app.use('/api/banners', require('./routes/bannerRoutes'));
+app.use(['/api/banner', '/api/banners', '/banner', '/banners'], require('./routes/bannerRoutes'));
 app.use('/api/earnings', require('./routes/earningsRoutes'));
 app.use('/api/cashfree', require('./routes/cashfreeRoutes'));
 app.use('/api/payment', require('./routes/razorpayRoutes'));
 app.use('/api/razorpay', require('./routes/razorpayRoutes'));
 app.use('/api/media', require('./routes/mediaRoutes'));
+const screenMediaRoutes = require('./routes/screenMediaRoutes');
+app.use(['/api/screen-media', '/api/screenmedia', '/screen-media', '/screenmedia'], screenMediaRoutes);
 app.use('/api/categories', require('./routes/categoryRoutes'));
 app.use('/api/category', require('./routes/categoryRoutes'));
 app.use('/api/cater', require('./routes/categoryRoutes'));
@@ -493,7 +494,7 @@ app.use('/api/reviews', require('./routes/reviewRoutes'));
 app.use('/api/review', require('./routes/reviewRoutes'));
 app.use('/api/terms', require('./routes/termsRoutes'));
 
-// Seed default Bhopal zones and Hindi Terms & Conditions
+// Seed default Bhopal zones, Hindi Terms & Conditions, and Screen Media Studio configurations
 const Zone = require('./models/Zone');
 if (Zone.seedDefaultZones) {
   Zone.seedDefaultZones().catch((err) => console.log('Zone seeding note:', err.message));
@@ -501,6 +502,9 @@ if (Zone.seedDefaultZones) {
 const TermsAndConditions = require('./models/TermsAndConditions');
 if (TermsAndConditions.seedDefaultTerms) {
   TermsAndConditions.seedDefaultTerms().catch((err) => console.log('Terms seeding note:', err.message));
+}
+if (screenMediaRoutes.ensureScreensSeeded) {
+  screenMediaRoutes.ensureScreensSeeded().catch((err) => console.log('Screen Media seeding note:', err.message));
 }
 
 // Error handling middleware (must be after routes)

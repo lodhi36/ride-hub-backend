@@ -11,6 +11,11 @@ const normalizeTarget = (target) => {
   if (t === 'RIDER' || t === 'RIDERS' || t === 'DELIVERY' || t === 'DELIVERY_PARTNER' || t === 'DRIVER') return 'RIDER';
   if (t === 'SUPPLIER' || t === 'SUPPLIERS' || t === 'RESTAURANT' || t === 'RESTAURANTS' || t === 'STORE' || t === 'STORES' || t === 'MERCHANT' || t === 'SELLER') return 'SUPPLIER';
   if (t === 'FASHION' || t === 'SUBCATEGORY' || t === 'SUBCATEGORIES') return 'FASHION';
+  if (t === 'FOOD') return 'FOOD';
+  if (t === 'TOYS' || t === 'TOY') return 'TOYS';
+  if (t === 'VEGETABLES' || t === 'VEGETABLE' || t === 'VEG') return 'VEGETABLES';
+  if (t === 'BEAUTY') return 'BEAUTY';
+  if (t === 'KIRANA' || t === 'GROCERY') return 'KIRANA';
   return t;
 };
 
@@ -31,14 +36,26 @@ exports.uploadBanner = async (req, res) => {
     const rawTarget = req.body.target || 'USER';
     const target = normalizeTarget(rawTarget);
 
-    // Target query matcher (supports both new 'USER'/'SUPPLIER'/'FASHION' and legacy)
+    // Target query matcher (supports 'USER'/'SUPPLIER'/'FASHION'/'FOOD'/'TOYS'/'VEGETABLES'/'BEAUTY'/'KIRANA' and legacy)
     const targetMatches = target === 'USER' 
       ? ['USER', 'Customer', 'User'] 
       : target === 'SUPPLIER' 
       ? ['SUPPLIER', 'Supplier', 'Restaurant'] 
       : target === 'FASHION'
       ? ['FASHION', 'Fashion', 'SUBCATEGORY', 'Subcategory']
-      : ['RIDER', 'Rider'];
+      : target === 'FOOD'
+      ? ['FOOD', 'Food']
+      : target === 'TOYS'
+      ? ['TOYS', 'Toys', 'TOY', 'Toy']
+      : target === 'VEGETABLES'
+      ? ['VEGETABLES', 'Vegetables', 'VEG', 'Veg']
+      : target === 'BEAUTY'
+      ? ['BEAUTY', 'Beauty']
+      : target === 'KIRANA'
+      ? ['KIRANA', 'Kirana', 'GROCERY', 'Grocery']
+      : target === 'RIDER'
+      ? ['RIDER', 'Rider']
+      : [target];
 
     // Check max 5 banners per target
     const count = await Banner.countDocuments({ target: { $in: targetMatches } });
@@ -99,6 +116,18 @@ exports.getBanners = async (req, res) => {
         query.target = { $in: ['RIDER', 'Rider', 'DELIVERY', 'Delivery'] };
       } else if (norm === 'FASHION') {
         query.target = { $in: ['FASHION', 'Fashion', 'SUBCATEGORY', 'Subcategory'] };
+      } else if (norm === 'FOOD') {
+        query.target = { $in: ['FOOD', 'Food'] };
+      } else if (norm === 'TOYS') {
+        query.target = { $in: ['TOYS', 'Toys', 'TOY', 'Toy'] };
+      } else if (norm === 'VEGETABLES') {
+        query.target = { $in: ['VEGETABLES', 'Vegetables', 'VEG', 'Veg'] };
+      } else if (norm === 'BEAUTY') {
+        query.target = { $in: ['BEAUTY', 'Beauty'] };
+      } else if (norm === 'KIRANA') {
+        query.target = { $in: ['KIRANA', 'Kirana', 'GROCERY', 'Grocery'] };
+      } else {
+        query.target = norm;
       }
     }
     if (req.query.status) {

@@ -66,6 +66,13 @@ const AdminSettingsSchema = new mongoose.Schema({
     speed: { type: Number, default: 0.9 },
     updatedAt: { type: Date, default: Date.now },
   },
+  // ── Fashion Demographics (Men, Women, Kids) Custom Images ────
+  fashionImages: {
+    men: { type: String, default: '' },
+    women: { type: String, default: '' },
+    kids: { type: String, default: '' },
+    updatedAt: { type: Date, default: Date.now },
+  },
 }, { timestamps: true });
 
 module.exports = mongoose.model('AdminSettings', AdminSettingsSchema);

@@ -25,6 +25,40 @@ router.get('/all', async (req, res) => {
   }
 });
 
+const STANDARD_CATEGORIES = [
+  { name: 'Food', description: 'Hot & fresh restaurant meals, fast food and snacks', icon: 'restaurant-outline', iconColor: '#EA580C', bgColor: '#FFF7ED', startingPrice: 99, estimatedTime: '20-30m' },
+  { name: 'Fashion', description: 'Trendy men, women and kids apparel and footwear', icon: 'shirt-outline', iconColor: '#E11D48', bgColor: '#FFF1F2', startingPrice: 199, estimatedTime: '30-45m' },
+  { name: 'Vegetables', description: 'Farm-fresh daily vegetables delivered to your doorstep', icon: 'nutrition-outline', iconColor: '#16A34A', bgColor: '#F0FDF4', startingPrice: 49, estimatedTime: '15-25m' },
+  { name: 'Fruits', description: 'Fresh seasonal and imported fruits', icon: 'basket-outline', iconColor: '#CA8A04', bgColor: '#FEFCE8', startingPrice: 69, estimatedTime: '15-25m' },
+  { name: 'Grocery/Kirana', description: 'Daily essentials, pulses, spices, flour and packaged goods', icon: 'cart-outline', iconColor: '#2563EB', bgColor: '#EFF6FF', startingPrice: 49, estimatedTime: '15-30m' },
+  { name: 'Beauty', description: 'Cosmetics, skincare, salon products and personal grooming', icon: 'sparkles-outline', iconColor: '#D946EF', bgColor: '#FDF4FF', startingPrice: 149, estimatedTime: '25-35m' },
+  { name: 'Electronics', description: 'Mobile accessories, audio devices, chargers and cables', icon: 'hardware-chip-outline', iconColor: '#0284C7', bgColor: '#F0F9FF', startingPrice: 199, estimatedTime: '30-45m' },
+  { name: 'Toys', description: 'Fun toys, board games, action figures and educational kits', icon: 'game-controller-outline', iconColor: '#9333EA', bgColor: '#FAF5FF', startingPrice: 129, estimatedTime: '25-40m' },
+  { name: 'Children Clothes', description: 'Cute baby wear, kids casuals, dresses and party outfits', icon: 'happy-outline', iconColor: '#F97316', bgColor: '#FFF7ED', startingPrice: 179, estimatedTime: '30-45m' },
+  { name: 'Men’s Fashion', description: 'Casual shirts, t-shirts, jeans, trousers and formal footwear', icon: 'man-outline', iconColor: '#2563EB', bgColor: '#EFF6FF', startingPrice: 249, estimatedTime: '30-45m' },
+  { name: 'Women’s Fashion', description: 'Sarees, kurtis, western wear, tops and traditional jewelry', icon: 'woman-outline', iconColor: '#EC4899', bgColor: '#FDF2F8', startingPrice: 299, estimatedTime: '30-45m' },
+  { name: 'Furniture', description: 'Home decor, study tables, chairs, cushions and organizers', icon: 'home-outline', iconColor: '#78716C', bgColor: '#F5F5F4', startingPrice: 499, estimatedTime: '45-60m' },
+];
+
+router.post('/seed-defaults', async (req, res) => {
+  try {
+    const results = [];
+    for (const cat of STANDARD_CATEGORIES) {
+      let existing = await Category.findOne({ name: { $regex: new RegExp(`^${cat.name}$`, 'i') } });
+      if (!existing) {
+        existing = await Category.create({ ...cat, isActive: true });
+        results.push({ action: 'created', name: cat.name });
+      } else {
+        results.push({ action: 'already_exists', name: cat.name });
+      }
+    }
+    const all = await Category.find({}).sort({ createdAt: -1 });
+    res.json({ success: true, message: 'Standard categories verified and seeded', results, categories: all });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // Admin: Add new category or update if name matches
 router.post('/', upload.single('image'), compressImage, async (req, res) => {
   try {
@@ -130,7 +164,9 @@ router.put('/:id', upload.single('image'), compressImage, async (req, res) => {
 
     if (req.file) {
       updateData.image = `/uploads/${req.file.filename}`;
-    } else if (req.body.image) {
+    } else if (req.body.removeImage === 'true' || req.body.removeImage === true || req.body.image === '') {
+      updateData.image = '';
+    } else if (req.body.image !== undefined) {
       updateData.image = req.body.image;
     }
 

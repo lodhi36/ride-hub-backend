@@ -603,12 +603,23 @@ async function riderAcceptDelivery(bookingId, riderId, passedLat, passedLon) {
     }
 
     if (checkBooking.riderId && checkBooking.riderId.toString() !== riderId.toString()) {
-      console.log(`⚠️ [RIDER_ACCEPT CONFLICT] Booking ${bookingId} already taken by rider ${checkBooking.riderId}`);
+      const assignedRiderName = checkBooking.riderName || checkBooking.acceptedBy?.name || checkBooking.rider?.name || null;
+      const assignedRiderId = checkBooking.riderId ? checkBooking.riderId.toString() : null;
+      console.log(`⚠️ [RIDER_ACCEPT CONFLICT] Booking ${bookingId} already taken by rider ${checkBooking.riderId} (${assignedRiderName || 'unnamed'})`);
+      const conflictMsg = assignedRiderName
+        ? `This ride has already been accepted by ${assignedRiderName}.`
+        : 'This ride has already been accepted by another partner.';
       return {
         success: false,
+        conflict: true,
         alreadyTaken: true,
-        message: 'This ride has already been accepted by another rider.',
-        booking: checkBooking,
+        error: 'ALREADY_ASSIGNED',
+        message: conflictMsg,
+        orderId: checkBooking.bookingId || bookingId,
+        bookingId: checkBooking.bookingId || bookingId,
+        assignedRiderId: assignedRiderId,
+        assignedRiderName: assignedRiderName,
+        authoritativeStatus: checkBooking.status || 'ASSIGNED',
       };
     }
 
@@ -724,42 +735,24 @@ async function riderAcceptDelivery(bookingId, riderId, passedLat, passedLon) {
     _io.emit('rider_assigned', broadcastData);
     _io.emit('RIDER_ASSIGNED', broadcastData);
     _io.emit('order_status_update', broadcastData);
-    _io.emit('ORDER_STATUS_UPDATED', broadcastData);
-    _io.emit('DELIVERY_REQUEST_CANCELLED', {
+    const cancelPayload = {
       bookingId: targetBId,
+      orderId: targetBId,
       rideId: targetBId,
       reason: 'assigned_to_another',
       assignedRiderId: riderId.toString(),
-      message: 'This order has already been assigned to another partner.',
-    });
-    _io.emit('ORDER_ASSIGNED_TO_OTHER', {
-      bookingId: targetBId,
-      rideId: targetBId,
-      assignedRiderId: riderId.toString(),
-    });
-    _io.emit('REMOVE_AVAILABLE_ORDER', {
-      bookingId: targetBId,
-      orderId: targetBId,
-      assignedRiderId: riderId.toString(),
-    });
+      assignedRiderName: riderName,
+      authoritativeStatus: updated.status || 'RIDER_ASSIGNED',
+      message: `This ride has already been accepted by ${riderName}.`,
+    };
 
-    _io.to('riders_room').emit('DELIVERY_REQUEST_CANCELLED', {
-      bookingId: targetBId,
-      rideId: targetBId,
-      reason: 'assigned_to_another',
-      assignedRiderId: riderId.toString(),
-      message: 'This order has already been assigned to another partner.',
-    });
-    _io.to('riders_room').emit('ORDER_ASSIGNED_TO_OTHER', {
-      bookingId: targetBId,
-      rideId: targetBId,
-      assignedRiderId: riderId.toString(),
-    });
-    _io.to('riders_room').emit('REMOVE_AVAILABLE_ORDER', {
-      bookingId: targetBId,
-      orderId: targetBId,
-      assignedRiderId: riderId.toString(),
-    });
+    _io.emit('DELIVERY_REQUEST_CANCELLED', cancelPayload);
+    _io.emit('ORDER_ASSIGNED_TO_OTHER', cancelPayload);
+    _io.emit('REMOVE_AVAILABLE_ORDER', cancelPayload);
+
+    _io.to('riders_room').emit('DELIVERY_REQUEST_CANCELLED', cancelPayload);
+    _io.to('riders_room').emit('ORDER_ASSIGNED_TO_OTHER', cancelPayload);
+    _io.to('riders_room').emit('REMOVE_AVAILABLE_ORDER', cancelPayload);
 
     function getStoreCategoryLabel(b) {
       const cat = (b?.categoryName || b?.businessCategoryName || b?.serviceName || b?.supplierCategory || '').toLowerCase();
@@ -781,7 +774,16 @@ async function riderAcceptDelivery(bookingId, riderId, passedLat, passedLon) {
     emitToRider(riderId, 'DELIVERY_ASSIGNED', { bookingId: targetBId, booking: riderRedactedBooking, message: `Order assign हुआ! ${storeLabel} पहुँचें।` });
   }
 
-  return { success: true, message: 'Rider assigned successfully', booking: redactDropLocationForRider(updated, true) };
+  return {
+    success: true,
+    message: 'Ride Accepted Successfully',
+    riderId: riderId.toString(),
+    riderName: riderName,
+    orderId: updated.bookingId || bookingId,
+    bookingId: updated.bookingId || bookingId,
+    authoritativeStatus: updated.status || 'PROVIDER_ACCEPTED',
+    booking: redactDropLocationForRider(updated, true),
+  };
 }
 
 async function riderRejectDelivery(bookingId, riderId, reason = 'Rider Declined') {

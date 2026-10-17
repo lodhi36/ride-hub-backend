@@ -7,8 +7,8 @@ const bannerSchema = new mongoose.Schema({
   },
   target: {
     type: String,
-    enum: ['USER', 'RIDER', 'SUPPLIER', 'Customer', 'Rider', 'Supplier', 'Restaurant', 'User', 'FASHION', 'Fashion', 'SUBCATEGORY', 'Subcategory'],
     default: 'USER',
+    trim: true,
   },
   status: {
     type: String,

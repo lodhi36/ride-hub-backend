@@ -1295,8 +1295,17 @@ exports.updateBookingStatus = async (req, res) => {
         booking.status = status;
         booking.deliveryStatus = 'CANCELLED';
         booking.riderStatus = 'CANCELLED';
-        booking.cancellationReason = cancellationReason || 'Order Cancelled';
-        const normalizedCancelledBy = (cancelledBy === 'PROVIDER' || cancelledBy === 'SUPPLIER' || cancelledBy === 'RESTAURANT' || cancelledBy === 'PARTNER') ? 'RESTAURANT' : (cancelledBy === 'RIDER' ? 'RIDER' : 'CUSTOMER');
+        const rawCancelledBy = String(cancelledBy || rawBody.cancelledBy || req.user?.role || 'CUSTOMER').toUpperCase();
+        let normalizedCancelledBy = 'CUSTOMER';
+        if (rawCancelledBy.includes('ADMIN')) {
+          normalizedCancelledBy = 'ADMIN';
+        } else if (rawCancelledBy === 'RIDER' || rawCancelledBy === 'DRIVER' || rawCancelledBy === 'DELIVERY_PARTNER') {
+          normalizedCancelledBy = 'RIDER';
+        } else if (rawCancelledBy === 'STORE' || rawCancelledBy === 'SUPPLIER' || rawCancelledBy === 'RESTAURANT' || rawCancelledBy === 'PROVIDER' || rawCancelledBy === 'PARTNER') {
+          normalizedCancelledBy = 'STORE';
+        } else {
+          normalizedCancelledBy = 'CUSTOMER';
+        }
         booking.cancelledBy = normalizedCancelledBy;
         booking.cancelledAt = new Date();
 
@@ -2277,6 +2286,44 @@ exports.restaurantAcceptOrder = async (req, res) => {
       return res.status(404).json({ success: false, error: 'Booking not found' });
     }
 
+    // 🛡️ Cancellation Protection
+    const currentStatusUpper = (booking.status || '').toUpperCase();
+    if (currentStatusUpper.includes('CANCEL')) {
+      return res.status(400).json({
+        success: false,
+        error: 'ORDER_ALREADY_CANCELLED',
+        message: 'This order has already been cancelled and cannot be accepted.',
+      });
+    }
+
+    // 🛡️ IDEMPOTENCY GUARD:
+    // If order has ALREADY been accepted (PREPARING, RESTAURANT_ACCEPTED, FOOD_READY, etc.)
+    const ALREADY_ACCEPTED_STATUSES = [
+      'PREPARING',
+      'RESTAURANT_ACCEPTED',
+      'FOOD_READY',
+      'READY_FOR_PICKUP',
+      'READY',
+      'PROVIDER_ACCEPTED',
+      'RIDER_ASSIGNED',
+      'RIDER_AT_RESTAURANT',
+      'REACHED_RESTAURANT',
+      'OUT_FOR_DELIVERY',
+      'FOOD_PICKED_UP',
+      'DELIVERED',
+      'COMPLETED',
+    ];
+    if (ALREADY_ACCEPTED_STATUSES.includes(currentStatusUpper)) {
+      console.log(`🛡️ [IDEMPOTENT ACCEPT] Order ${booking.bookingId} is already accepted (status: ${booking.status}). Returning existing booking state idempotently without resetting timers or re-dispatching.`);
+      const resolved = await resolveBookingNames(booking.toObject());
+      return res.status(200).json({
+        success: true,
+        alreadyAccepted: true,
+        message: `Order #${booking.bookingId} is already accepted and currently in ${booking.status} status.`,
+        booking: resolved,
+      });
+    }
+
     const effectiveRestaurantId = restaurantId || booking.restaurantId || booking.providerId;
 
     const prepMinutes = Number(preparationTime) || Number(booking.preparationTime) || 15;
@@ -2467,7 +2514,8 @@ exports.riderAcceptDelivery = async (req, res) => {
       }
       return res.status(200).json(result);
     } else {
-      return res.status(409).json(result);
+      const statusCode = result.message === 'Booking not found.' ? 404 : 409;
+      return res.status(statusCode).json(result);
     }
   } catch (err) {
     console.error('Error in riderAcceptDelivery:', err);
@@ -2681,8 +2729,8 @@ exports.restaurantDeclineOrder = async (req, res) => {
     booking.status = declineStatus;
     booking.deliveryStatus = 'CANCELLED';
     booking.riderStatus = 'CANCELLED';
-    booking.cancellationReason = reason || 'Declined by restaurant';
-    booking.cancelledBy = 'RESTAURANT';
+    booking.cancellationReason = reason || 'Declined by store';
+    booking.cancelledBy = 'STORE';
     booking.cancelledAt = new Date();
     if (!booking.scheduledDate) booking.scheduledDate = new Date().toISOString().split('T')[0];
     if (!booking.scheduledTime) booking.scheduledTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -2700,7 +2748,7 @@ exports.restaurantDeclineOrder = async (req, res) => {
       }
     }
 
-    console.log(`❌ [RESTAURANT_DECLINED] bookingId: ${booking.bookingId}, status: ${declineStatus}, reason: ${booking.cancellationReason}`);
+    console.log(`❌ [STORE_DECLINED] bookingId: ${booking.bookingId}, status: ${declineStatus}, reason: ${booking.cancellationReason}`);
 
     const bookingObj = await resolveBookingNames(booking.toObject());
 
@@ -2713,7 +2761,7 @@ exports.restaurantDeclineOrder = async (req, res) => {
         deliveryStatus: 'CANCELLED',
         reason: booking.cancellationReason,
         cancellationReason: booking.cancellationReason,
-        cancelledBy: 'RESTAURANT',
+        cancelledBy: 'STORE',
         booking: bookingObj,
       };
 
@@ -3242,9 +3290,17 @@ exports.cancelBooking = async (req, res) => {
   try {
     const rawBody = req.body || {};
     const bookingId = req.params.bookingId || rawBody.bookingId || rawBody.rideId || rawBody.id;
-    const cancellationReason = rawBody.cancellationReason || rawBody.reason || 'Cancelled by customer';
-    const rawCancelledBy = (rawBody.cancelledBy || 'CUSTOMER').toUpperCase();
-    const normalizedCancelledBy = (rawCancelledBy === 'PROVIDER' || rawCancelledBy === 'SUPPLIER' || rawCancelledBy === 'RESTAURANT' || rawCancelledBy === 'PARTNER') ? 'RESTAURANT' : (rawCancelledBy === 'RIDER' ? 'RIDER' : 'CUSTOMER');
+    const rawCancelledBy = String(rawBody.cancelledBy || req.user?.role || 'CUSTOMER').toUpperCase();
+    let normalizedCancelledBy = 'CUSTOMER';
+    if (rawCancelledBy.includes('ADMIN')) {
+      normalizedCancelledBy = 'ADMIN';
+    } else if (rawCancelledBy === 'RIDER' || rawCancelledBy === 'DRIVER' || rawCancelledBy === 'DELIVERY_PARTNER') {
+      normalizedCancelledBy = 'RIDER';
+    } else if (rawCancelledBy === 'STORE' || rawCancelledBy === 'SUPPLIER' || rawCancelledBy === 'RESTAURANT' || rawCancelledBy === 'PROVIDER' || rawCancelledBy === 'PARTNER') {
+      normalizedCancelledBy = 'STORE';
+    } else {
+      normalizedCancelledBy = 'CUSTOMER';
+    }
 
     if (!bookingId) {
       return res.status(400).json({ success: false, error: 'bookingId is required' });
@@ -3508,15 +3564,21 @@ exports.cancelBooking = async (req, res) => {
     return res.json({
       success: true,
       message: 'Order cancelled successfully',
-      booking,
-      order: booking,
+      orderId: booking.bookingId,
+      bookingId: booking.bookingId,
       status: 'CANCELLED',
+      cancelledBy: normalizedCancelledBy,
+      cancellationReason: booking.cancellationReason,
+      reason: booking.cancellationReason,
+      cancelledAt: booking.cancelledAt,
       paidAmount: booking.paidAmount,
       refundAmount: booking.refundAmount,
       isNonRefundable: booking.isNonRefundable,
       refundStatus: booking.refundStatus,
       paymentStatus: booking.paymentStatus,
       riderCompensation: booking.riderCompensation || 0,
+      booking,
+      order: booking,
     });
   } catch (error) {
     console.error('❌ [cancelBooking Error]', error);

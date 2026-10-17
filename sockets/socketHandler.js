@@ -390,13 +390,33 @@ const socketHandler = (io) => {
         const riderId   = data && (data.riderId || data.userId) || socket.userId;
         if (!bookingId || !riderId) return;
 
+        const lat = Number(data.latitude || (data.location && data.location.latitude) || 0);
+        const lon = Number(data.longitude || (data.location && data.location.longitude) || 0);
+
         console.log(`[RIDER_ACCEPT] Rider ${riderId} accepted booking ${bookingId}`);
-        const result = await riderSearchService.riderAcceptDelivery(bookingId, riderId.toString());
+        const result = await riderSearchService.riderAcceptDelivery(bookingId, riderId.toString(), lat || undefined, lon || undefined);
 
         if (result.success) {
-          socket.emit('rider_accept_success', { bookingId, message: result.message });
+          socket.emit('rider_accept_success', {
+            bookingId: result.bookingId || bookingId,
+            orderId: result.orderId || bookingId,
+            riderId: result.riderId || riderId.toString(),
+            riderName: result.riderName,
+            authoritativeStatus: result.authoritativeStatus || 'PROVIDER_ACCEPTED',
+            message: result.message || 'Ride Accepted Successfully',
+            booking: result.booking,
+          });
         } else {
-          socket.emit('rider_accept_failed', { bookingId, message: result.message, alreadyTaken: result.alreadyTaken });
+          socket.emit('rider_accept_failed', {
+            bookingId: result.bookingId || bookingId,
+            orderId: result.orderId || bookingId,
+            conflict: Boolean(result.conflict || result.alreadyTaken),
+            alreadyTaken: Boolean(result.alreadyTaken),
+            assignedRiderId: result.assignedRiderId,
+            assignedRiderName: result.assignedRiderName,
+            authoritativeStatus: result.authoritativeStatus,
+            message: result.message,
+          });
         }
       } catch (err) {
         console.error('[rider_accept_request] Error:', err.message);
@@ -3013,9 +3033,18 @@ status: COMPLETED`);
         console.log(`⏱️ [20S DELAY CANCELLED via socket] Cleared supplier dispatch timer for #${rideId}`);
       }
 
-      const isProvider = cancelledBy === 'PROVIDER' || cancelledBy === 'supplier' || cancelledBy === 'rider';
+      const rawActor = String(cancelledBy || '').toUpperCase();
+      let actor = 'CUSTOMER';
+      if (rawActor.includes('ADMIN')) {
+        actor = 'ADMIN';
+      } else if (rawActor === 'RIDER' || rawActor === 'DRIVER' || rawActor === 'DELIVERY_PARTNER') {
+        actor = 'RIDER';
+      } else if (rawActor === 'STORE' || rawActor === 'SUPPLIER' || rawActor === 'RESTAURANT' || rawActor === 'PROVIDER' || rawActor === 'PARTNER') {
+        actor = 'STORE';
+      } else {
+        actor = 'CUSTOMER';
+      }
       const statusToSet = 'CANCELLED';
-      const actor = isProvider ? 'SUPPLIER' : 'CUSTOMER';
 
       let assignedRiderId = null;
       let updatedRide = null;
@@ -3103,9 +3132,17 @@ status: ${statusToSet}`);
           console.log(`⏱️ [20S DELAY CANCELLED via socket] Cleared supplier dispatch timer for #${bId}`);
         }
 
-        const normalizedCancelledBy = (cancelledBy === 'PROVIDER' || cancelledBy === 'SUPPLIER' || cancelledBy === 'RIDER' || cancelledBy === 'PARTNER')
-          ? 'SUPPLIER'
-          : 'CUSTOMER';
+        const rawActor = String(cancelledBy || '').toUpperCase();
+        let normalizedCancelledBy = 'CUSTOMER';
+        if (rawActor.includes('ADMIN')) {
+          normalizedCancelledBy = 'ADMIN';
+        } else if (rawActor === 'RIDER' || rawActor === 'DRIVER' || rawActor === 'DELIVERY_PARTNER') {
+          normalizedCancelledBy = 'RIDER';
+        } else if (rawActor === 'STORE' || rawActor === 'SUPPLIER' || rawActor === 'RESTAURANT' || rawActor === 'PROVIDER' || rawActor === 'PARTNER') {
+          normalizedCancelledBy = 'STORE';
+        } else {
+          normalizedCancelledBy = 'CUSTOMER';
+        }
 
         if (pendingRides.has(bId)) {
           const r = pendingRides.get(bId);

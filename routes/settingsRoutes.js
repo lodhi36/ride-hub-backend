@@ -194,14 +194,15 @@ router.all('/splash', splashUpload, compressImage, async (req, res, next) => {
     if (b.supplierImageUrl !== undefined) updatedSplash.supplier.image = b.supplierImageUrl;
     if (b.deliveryImageUrl !== undefined) updatedSplash.delivery.image = b.deliveryImageUrl;
 
+    updatedSplash.updatedAt = new Date();
     settings.splashScreen = updatedSplash;
     await settings.save();
 
     // Broadcast socket event
-    const io = req.app.get('io');
+    const io = req.app.get('io') || global.io;
     if (io) {
       io.emit('splash_screen_updated', updatedSplash);
-      console.log('📡 [Socket Emit] splash_screen_updated');
+      console.log('📡 [Socket Emit] splash_screen_updated with timestamp:', updatedSplash.updatedAt);
     }
 
     res.json({ success: true, message: 'Splash screen settings updated successfully', splashScreen: updatedSplash });
@@ -273,6 +274,106 @@ router.post(['/diamond-animation', '/diamond-lottie'], lottieUpload, async (req,
     res.json({ success: true, message: 'Diamond animation updated successfully', diamondAnimation: updated });
   } catch (error) {
     console.error('Error updating diamond animation:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// GET /api/settings/fashion-demographics (Public for fashion screen & admin)
+router.get('/fashion-demographics', async (req, res) => {
+  try {
+    let settings = await AdminSettings.findOne();
+    if (!settings) {
+      settings = await AdminSettings.create({});
+    }
+    const fashion = settings.fashionImages || {
+      men: '',
+      women: '',
+      kids: '',
+      updatedAt: new Date(),
+    };
+    res.json({ success: true, fashionImages: fashion });
+  } catch (error) {
+    res.status(200).json({
+      success: true,
+      fashionImages: { men: '', women: '', kids: '', updatedAt: new Date() },
+    });
+  }
+});
+
+// POST & PUT /api/settings/fashion-demographics (Admin upload individual images)
+const fashionUpload = upload.fields([
+  { name: 'menImage', maxCount: 1 },
+  { name: 'womenImage', maxCount: 1 },
+  { name: 'kidsImage', maxCount: 1 },
+  { name: 'image', maxCount: 1 },
+]);
+
+router.all('/fashion-demographics', fashionUpload, compressImage, async (req, res, next) => {
+  if (req.method !== 'POST' && req.method !== 'PUT') return next();
+  try {
+    let settings = await AdminSettings.findOne();
+    if (!settings) {
+      settings = await AdminSettings.create({});
+    }
+
+    const current = settings.fashionImages ? settings.fashionImages.toObject() : { men: '', women: '', kids: '' };
+    const b = req.body || {};
+
+    const updated = {
+      men: current.men || '',
+      women: current.women || '',
+      kids: current.kids || '',
+      updatedAt: new Date(),
+    };
+
+    if (req.files) {
+      if (req.files.menImage && req.files.menImage[0]) {
+        updated.men = `/uploads/${req.files.menImage[0].filename}`;
+      }
+      if (req.files.womenImage && req.files.womenImage[0]) {
+        updated.women = `/uploads/${req.files.womenImage[0].filename}`;
+      }
+      if (req.files.kidsImage && req.files.kidsImage[0]) {
+        updated.kids = `/uploads/${req.files.kidsImage[0].filename}`;
+      }
+    }
+
+    // Direct demographic target if uploaded with generic 'image' and 'target' = 'men'|'women'|'kids'
+    if (b.target && req.files && req.files.image && req.files.image[0]) {
+      const t = String(b.target).toLowerCase();
+      if (t.includes('men')) updated.men = `/uploads/${req.files.image[0].filename}`;
+      else if (t.includes('women')) updated.women = `/uploads/${req.files.image[0].filename}`;
+      else if (t.includes('kid') || t.includes('child')) updated.kids = `/uploads/${req.files.image[0].filename}`;
+    }
+
+    // Handle removal of specific demographic image
+    if ((b.removeImage === true || b.removeImage === 'true') && b.target) {
+      const t = String(b.target).toLowerCase();
+      if (t.includes('men')) updated.men = '';
+      else if (t.includes('women')) updated.women = '';
+      else if (t.includes('kid') || t.includes('child')) updated.kids = '';
+    }
+
+    if (b.menUrl !== undefined) updated.men = b.menUrl;
+    if (b.womenUrl !== undefined) updated.women = b.womenUrl;
+    if (b.kidsUrl !== undefined) updated.kids = b.kidsUrl;
+
+    settings.fashionImages = updated;
+    await settings.save();
+
+    const io = req.app.get('io') || global.io;
+    if (io) {
+      io.emit('fashion_demographics_updated', updated);
+      console.log('📡 [Socket Emit] fashion_demographics_updated');
+    }
+
+    res.json({
+      success: true,
+      message: 'Fashion demographic images updated successfully',
+      fashionImages: updated,
+    });
+  } catch (error) {
+    console.error('Error updating fashion demographic images:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 });
