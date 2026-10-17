@@ -133,6 +133,20 @@ const staticUploadsMiddleware = express.static(path.join(__dirname, 'uploads'), 
     }
   }
 });
+
+// Auto-fix client requests where /uploads was joined without a slash (e.g. /uploadsscreen-...)
+app.use((req, res, next) => {
+  if (req.url.startsWith('/uploads') && !req.url.startsWith('/uploads/')) {
+    const fixedUrl = req.url.replace(/^\/uploads/, '/uploads/');
+    return res.redirect(301, fixedUrl);
+  }
+  if (req.url.startsWith('/api/uploads') && !req.url.startsWith('/api/uploads/')) {
+    const fixedUrl = req.url.replace(/^\/api\/uploads/, '/api/uploads/');
+    return res.redirect(301, fixedUrl);
+  }
+  next();
+});
+
 app.use('/uploads', staticUploadsMiddleware);
 app.use('/api/uploads', staticUploadsMiddleware);
 
