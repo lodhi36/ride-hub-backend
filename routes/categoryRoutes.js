@@ -231,14 +231,31 @@ router.delete('/:id', async (req, res) => {
     res.status(400).json({ success: false, message: err.message });
   }
 });
-// Get Fashion Category and Subcategories
+// Get Fashion Category and Subcategories (with optional demographic filtering)
 router.get('/fashion', async (req, res) => {
   try {
     const category = await Category.findOne({ name: { $regex: 'fashion', $options: 'i' } });
     if (!category) {
       return res.status(404).json({ success: false, message: 'Fashion category not found' });
     }
-    res.json({ success: true, category, subcategories: category.subcategories || [] });
+    let subcategories = (category.subcategories || []).filter(s => s.isActive !== false);
+    if (req.query.demographic && req.query.demographic !== 'ALL' && req.query.demographic !== 'All') {
+      const targetDemo = req.query.demographic.toLowerCase().trim();
+      subcategories = subcategories.filter(s => {
+        const d = (s.demographic || 'All').toLowerCase().trim();
+        if (targetDemo === 'male' || targetDemo === 'men') {
+          return d === 'male' || d === 'men' || d === 'all';
+        }
+        if (targetDemo === 'female' || targetDemo === 'women') {
+          return d === 'female' || d === 'women' || d === 'all';
+        }
+        if (targetDemo === 'kids' || targetDemo === 'kid') {
+          return d === 'kids' || d === 'kid' || d === 'children' || d === 'all';
+        }
+        return d === targetDemo || d === 'all';
+      });
+    }
+    res.json({ success: true, category, subcategories });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -277,7 +294,7 @@ router.get('/:id', async (req, res) => {
 // Admin: Add Subcategory
 router.post('/:id/subcategories', async (req, res) => {
   try {
-    const { name, price, description, icon, isActive } = req.body;
+    const { name, price, description, icon, image, demographic, isActive } = req.body;
     if (!name || !name.trim()) {
       return res.status(400).json({ success: false, message: 'Subcategory name is required' });
     }
@@ -285,11 +302,23 @@ router.post('/:id/subcategories', async (req, res) => {
     if (!category) {
       return res.status(404).json({ success: false, message: 'Category not found' });
     }
+
+    const cleanName = name.trim();
+    const existing = (category.subcategories || []).find(
+      s => s.name && s.name.toLowerCase() === cleanName.toLowerCase() &&
+           (s.demographic || 'All').toLowerCase() === (demographic || 'All').toLowerCase()
+    );
+    if (existing) {
+      return res.status(400).json({ success: false, message: 'Subcategory already exists for this category/demographic' });
+    }
+
     const newSub = {
-      name: name.trim(),
+      name: cleanName,
       price: Number(price) || 199,
       description: description || '',
       icon: icon || 'sparkles-outline',
+      image: image || '',
+      demographic: demographic || 'All',
       isActive: isActive !== false,
     };
     category.subcategories.push(newSub);
@@ -323,6 +352,8 @@ router.put('/:id/subcategories/:subId', async (req, res) => {
     if (req.body.price !== undefined) sub.price = Number(req.body.price);
     if (req.body.description !== undefined) sub.description = req.body.description;
     if (req.body.icon) sub.icon = req.body.icon;
+    if (req.body.image !== undefined) sub.image = req.body.image;
+    if (req.body.demographic !== undefined) sub.demographic = req.body.demographic;
     if (req.body.isActive !== undefined) sub.isActive = req.body.isActive;
 
     await category.save();

@@ -52,7 +52,8 @@ const categorySchema = new mongoose.Schema(
           isActive: { type: Boolean, default: true },
           description: { type: String, default: '' },
           icon: { type: String, default: 'sparkles-outline' },
-          image: { type: String, default: '' }
+          image: { type: String, default: '' },
+          demographic: { type: String, default: 'All' }, // 'Male' | 'Female' | 'Kids' | 'All'
         }
       ],
       default: [],

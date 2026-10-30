@@ -243,15 +243,42 @@ const getMenuItems = async (req, res) => {
       filter.isAvailable = { $ne: false };
     }
     if (req.query.demographic && req.query.demographic !== 'ALL' && req.query.demographic !== 'All') {
-      filter.$or = [
-        { demographic: req.query.demographic },
-        { demographic: 'All' },
-        { demographic: 'Unisex' },
-        { demographic: { $exists: false } },
-      ];
+      const demoParam = req.query.demographic.trim().toLowerCase();
+      const demoMatches = [req.query.demographic];
+      if (demoParam === 'male' || demoParam === 'men') {
+        demoMatches.push('Male', 'male', 'Men', 'men');
+      } else if (demoParam === 'female' || demoParam === 'women') {
+        demoMatches.push('Female', 'female', 'Women', 'women');
+      } else if (demoParam === 'kids' || demoParam === 'kid') {
+        demoMatches.push('Kids', 'kids', 'Children', 'children', 'Boys', 'Girls', 'Baby');
+      }
+      filter.$and = filter.$and || [];
+      filter.$and.push({
+        $or: [
+          { demographic: { $in: demoMatches } },
+          { demographic: 'All' },
+          { demographic: 'Unisex' },
+          { demographic: { $exists: false } },
+          { demographic: '' },
+          { demographic: null },
+        ]
+      });
+    }
+    if (req.query.subcategory && req.query.subcategory !== 'All' && req.query.subcategory !== 'all') {
+      const subTerm = req.query.subcategory.trim();
+      const subRegex = new RegExp(subTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      filter.$and = filter.$and || [];
+      filter.$and.push({
+        $or: [
+          { subcategory: subRegex },
+          { category: subRegex },
+          { name: subRegex },
+          { description: subRegex },
+        ]
+      });
     }
     if (req.query.category && req.query.category !== 'All' && req.query.category !== 'all') {
-      filter.category = { $regex: new RegExp(req.query.category.trim(), 'i') };
+      filter.category = { $regex: new RegExp(req.query.category.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') };
     }
 
     const items = await MenuItem.find(filter).sort({ createdAt: -1 });
