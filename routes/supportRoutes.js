@@ -73,5 +73,12 @@ router.post('/login', supportController.agentLogin);
 // Payout Rules
 router.get('/payout-rules', supportController.getPayoutRules);
 
+// ── AI Support Agent Endpoints (All 3 Roles) ─────────────────
+const aiSupportController = require('../controllers/aiSupportController');
+router.post(['/ai-chat', '/ai/chat'], aiSupportController.chatWithAgent);
+router.post(['/ai-feedback', '/ai/feedback'], aiSupportController.submitFeedback);
+router.get(['/ai-quick-buttons', '/ai/quick-buttons'], aiSupportController.getQuickButtons);
+router.post(['/ai-ticket', '/ai/create-ticket'], aiSupportController.createSupportTicketFromAI);
+
 module.exports = router;
 

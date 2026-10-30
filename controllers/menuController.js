@@ -26,8 +26,13 @@ const DEFAULT_CATEGORIES_BY_TYPE = {
 // @access  Public / Private
 const getCategories = async (req, res) => {
   try {
-    const restaurantId =
+    let restaurantId =
       req.params.restaurantId || req.query.restaurantId || (req.user ? (req.user._id || req.user.id) : null);
+
+    // If caller is an authenticated supplier/merchant, strictly isolate to their own store
+    if (req.user && ['supplier', 'seller_partner', 'restaurant', 'provider'].includes((req.user.role || '').toLowerCase())) {
+      restaurantId = String(req.user._id || req.user.id);
+    }
 
     if (!restaurantId || restaurantId === 'undefined' || restaurantId === 'null') {
       return res.json({ success: true, count: 0, categories: [] });
@@ -119,11 +124,11 @@ const getCategories = async (req, res) => {
 // @access  Private / Supplier / Restaurant
 const addCategory = async (req, res) => {
   try {
-    const restaurantId = req.user ? (req.user._id || req.user.id) : req.body.restaurantId;
+    const restaurantId = req.user ? (req.user._id || req.user.id) : null;
     const { name } = req.body;
 
     if (!restaurantId || !name || !name.trim()) {
-      return res.status(400).json({ success: false, message: 'Supplier ID and Category Name are required.' });
+      return res.status(400).json({ success: false, message: 'Authenticated Supplier ID and Category Name are required.' });
     }
 
     const cleanName = name.trim();
@@ -165,7 +170,18 @@ const addCategory = async (req, res) => {
 const deleteCategory = async (req, res) => {
   try {
     const { id } = req.params;
-    const cat = await RestaurantCategory.findByIdAndDelete(id);
+    const cat = await RestaurantCategory.findById(id);
+
+    if (!cat) {
+      return res.status(404).json({ success: false, message: 'Category not found' });
+    }
+
+    // Strict ownership verification: Only owner supplier or admin can delete category
+    if (req.user && cat.restaurantId && cat.restaurantId.toString() !== String(req.user._id || req.user.id) && req.user.role !== 'admin') {
+      return res.status(403).json({ success: false, message: 'Unauthorized: You do not own this category' });
+    }
+
+    await RestaurantCategory.findByIdAndDelete(id);
 
     const io = req.app.get('io');
     if (io && cat) {
@@ -185,8 +201,15 @@ const deleteCategory = async (req, res) => {
 // @access  Public / Private
 const getMenuItems = async (req, res) => {
   try {
-    const restaurantId =
-      req.params.restaurantId || req.query.restaurantId || (req.user ? (req.user._id || req.user.id) : null);
+    const callerRole = (req.user?.role || '').toLowerCase();
+    let restaurantId = req.params.restaurantId || req.query.restaurantId;
+
+    // Strict supplier isolation: If caller is authenticated as a supplier/restaurant, always enforce their own store
+    if (req.user && ['supplier', 'restaurant', 'seller_partner'].includes(callerRole)) {
+      restaurantId = String(req.user._id || req.user.id);
+    } else if (!restaurantId && req.user) {
+      restaurantId = String(req.user._id || req.user.id);
+    }
 
     if (!restaurantId || restaurantId === 'undefined' || restaurantId === 'null') {
       return res.json({ success: true, count: 0, items: [] });
@@ -251,7 +274,14 @@ const getMenuItems = async (req, res) => {
 // @access  Private / Supplier / Restaurant
 const addMenuItem = async (req, res) => {
   try {
-    const restaurantId = req.user ? (req.user._id || req.user.id) : req.body.restaurantId;
+    let restaurantId;
+    if (req.user && req.user.role === 'admin') {
+      restaurantId = req.body.restaurantId || req.user._id || req.user.id;
+    } else if (req.user) {
+      restaurantId = req.user._id || req.user.id;
+    } else {
+      return res.status(401).json({ success: false, message: 'Unauthorized: Authentication required.' });
+    }
     const { name, price, mrp, category, description, image, isVeg, isAvailable, isRefundable, refundPolicy, demographic, brand, rating, reviewsCount } = req.body;
 
     if (!restaurantId || !name || price === undefined) {
@@ -328,6 +358,14 @@ const updateMenuItem = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Menu item not found' });
     }
 
+    // Ownership check: Non-admin can only update their own items
+    if (req.user && req.user.role !== 'admin') {
+      const callerId = String(req.user._id || req.user.id);
+      if (item.restaurantId && item.restaurantId.toString() !== callerId) {
+        return res.status(403).json({ success: false, message: 'Unauthorized: You do not own this menu item.' });
+      }
+    }
+
     const wasAvailable = item.isAvailable;
     const fieldsToUpdate = ['name', 'price', 'mrp', 'category', 'demographic', 'brand', 'rating', 'reviewsCount', 'description', 'image', 'isVeg', 'isAvailable', 'isRefundable', 'refundPolicy'];
     fieldsToUpdate.forEach((field) => {
@@ -363,11 +401,21 @@ const updateMenuItem = async (req, res) => {
 const deleteMenuItem = async (req, res) => {
   try {
     const { id } = req.params;
-    const item = await MenuItem.findByIdAndDelete(id);
+    const item = await MenuItem.findById(id);
 
     if (!item) {
       return res.status(404).json({ success: false, message: 'Menu item not found' });
     }
+
+    // Ownership check: Non-admin can only delete their own items
+    if (req.user && req.user.role !== 'admin') {
+      const callerId = String(req.user._id || req.user.id);
+      if (item.restaurantId && item.restaurantId.toString() !== callerId) {
+        return res.status(403).json({ success: false, message: 'Unauthorized: You do not own this menu item.' });
+      }
+    }
+
+    await MenuItem.findByIdAndDelete(id);
 
     const io = req.app.get('io');
     if (io) {

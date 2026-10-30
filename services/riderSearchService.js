@@ -713,22 +713,30 @@ async function riderAcceptDelivery(bookingId, riderId, passedLat, passedLon) {
 
     // Broadcast Rider Location
     if (riderLat !== 0 && riderLon !== 0) {
-      _io.to(`booking_${targetBId}`).emit('rider_location_update', {
+      const locPayload = {
         bookingId: targetBId,
+        orderId: targetBId,
         rideId: targetBId,
         riderId: riderId.toString(),
+        providerId: riderId.toString(),
         latitude: riderLat,
         longitude: riderLon,
+        driverLat: riderLat,
+        driverLon: riderLon,
         location: acceptedByObj.location,
-      });
-      _io.to(`booking_${targetBId}`).emit('rider_location_updated', {
-        bookingId: targetBId,
-        rideId: targetBId,
-        riderId: riderId.toString(),
-        latitude: riderLat,
-        longitude: riderLon,
-        location: acceptedByObj.location,
-      });
+        timestamp: Date.now(),
+      };
+      _io.to(`booking_${targetBId}`).emit('rider_location_update', locPayload);
+      _io.to(`booking_${targetBId}`).emit('rider_location_updated', locPayload);
+      _io.to(`order_${targetBId}`).emit('rider_location_update', locPayload);
+      _io.to(`order_${targetBId}`).emit('rider_location_updated', locPayload);
+      _io.to(`ride_${targetBId}`).emit('rider_location_update', locPayload);
+      _io.emit(`provider_location_${targetBId}`, locPayload);
+      if (updated.customerId) {
+        _io.to(`user_${updated.customerId}`).emit('rider_location_update', locPayload);
+        _io.to(`user_${updated.customerId}`).emit('rider_location_updated', locPayload);
+        _io.to(`customer_${updated.customerId}`).emit('rider_location_update', locPayload);
+      }
     }
 
     // Global broadcast for instant sync across ALL delivery partners

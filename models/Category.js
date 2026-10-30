@@ -51,7 +51,8 @@ const categorySchema = new mongoose.Schema(
           price: { type: Number, default: 199 },
           isActive: { type: Boolean, default: true },
           description: { type: String, default: '' },
-          icon: { type: String, default: 'sparkles-outline' }
+          icon: { type: String, default: 'sparkles-outline' },
+          image: { type: String, default: '' }
         }
       ],
       default: [],

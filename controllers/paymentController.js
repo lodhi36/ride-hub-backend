@@ -104,16 +104,26 @@ exports.verifyPayment = async (req, res) => {
 };
 
 // ── Helper: compute true available balance ──
-// user.coins = primary withdrawable balance (incremented on gift receive)
-// Cross-check with transaction history for new data
+// Includes all legitimate earning streams (store orders, delivery fees, gifts, bookings)
 const computeAvailableBalance = async (userId, userCoins) => {
+  const earningTypes = [
+    'service_earning',
+    'delivery_earning',
+    'order_earning',
+    'gift_received',
+    'voice_call',
+    'video_call',
+    'live_token',
+    'media_unlock'
+  ];
+
   const result = await Transaction.aggregate([
     { $match: { userId: new mongoose.Types.ObjectId(userId.toString()) } },
     {
       $group: {
         _id: null,
         totalReceived: {
-          $sum: { $cond: [{ $eq: ['$type', 'gift_received'] }, '$amount', 0] }
+          $sum: { $cond: [{ $in: ['$type', earningTypes] }, '$amount', 0] }
         },
         totalWithdrawn: {
           $sum: { $cond: [{ $eq: ['$type', 'withdrawal_payout'] }, { $abs: '$amount' }, 0] }
@@ -123,11 +133,9 @@ const computeAvailableBalance = async (userId, userCoins) => {
   ]);
 
   if (result.length === 0) {
-    // No transactions found — fall back to user.coins (old data)
     return { totalReceived: userCoins, totalWithdrawn: 0, availableBalance: Math.max(0, userCoins) };
   }
   const { totalReceived, totalWithdrawn } = result[0];
-  // Use whichever is higher: transaction-based OR user.coins (handles old data)
   const availableBalance = Math.max(userCoins, totalReceived - totalWithdrawn);
   return { totalReceived: Math.max(totalReceived, userCoins), totalWithdrawn, availableBalance };
 };
@@ -146,7 +154,7 @@ exports.requestWithdrawal = async (req, res) => {
     }
 
     if (!bankDetails) {
-      return res.status(400).json({ success: false, message: 'Bank details are required.' });
+      return res.status(400).json({ success: false, message: 'Bank details or UPI ID are required.' });
     }
 
     const user = await User.findById(userId);
@@ -154,8 +162,8 @@ exports.requestWithdrawal = async (req, res) => {
       return res.status(404).json({ success: false, message: 'User not found.' });
     }
 
-    // user.coins IS the withdrawable balance
-    const currentBalance = user.coins || 0;
+    // Available withdrawable balance across walletBalance and coins
+    const currentBalance = Math.max(user.walletBalance || 0, user.availableBalance || 0, user.coins || 0);
 
     if (amount > currentBalance) {
       return res.status(400).json({
@@ -164,11 +172,13 @@ exports.requestWithdrawal = async (req, res) => {
       });
     }
 
-    // Deduct from user.coins instantly
-    user.coins = currentBalance - amount;
+    // Atomically deduct from user balances
+    user.walletBalance = Math.max(0, (user.walletBalance || 0) - amount);
+    user.availableBalance = Math.max(0, (user.availableBalance || 0) - amount);
+    user.coins = Math.max(0, (user.coins || 0) - amount);
     await user.save();
 
-    // Log withdrawal transaction for history
+    // Log pending withdrawal transaction in ledger
     await Transaction.create({
       userId,
       type: 'withdrawal_payout',
@@ -176,16 +186,24 @@ exports.requestWithdrawal = async (req, res) => {
       currency: 'INR',
       coinsAdded: 0,
       status: 'pending',
-      description: `Withdrawal request: ₹${amount} to ${bankDetails}`,
+      description: `Withdrawal request: ₹${amount} to ${typeof bankDetails === 'object' ? JSON.stringify(bankDetails) : bankDetails}`,
     });
 
-    // Create withdrawal request for admin panel
+    const isSupplier = user.role === 'supplier' || Boolean(user.restaurantName);
+    const resolvedRole = isSupplier ? 'supplier' : (user.role || 'customer');
+
+    // Create withdrawal request for admin panel with real store/profile attributes
     const withdrawal = await Withdrawal.create({
       userId,
+      userRole: resolvedRole,
       withdrawAmount: amount,
       balanceBefore: currentBalance,
-      balanceAfter: user.coins,
+      balanceAfter: currentBalance - amount,
       bankDetails,
+      upiId: typeof bankDetails === 'string' && bankDetails.includes('@') ? bankDetails : (user.upiId || null),
+      contactNumber: user.phoneNumber || user.phone || null,
+      storeName: isSupplier ? (user.restaurantName || user.name) : null,
+      storeAddress: isSupplier ? (user.businessAddress || user.location || user.address) : null,
       status: 'pending',
     });
 
@@ -193,7 +211,7 @@ exports.requestWithdrawal = async (req, res) => {
       success: true,
       message: 'Withdrawal request submitted successfully.',
       withdrawal,
-      availableBalance: user.coins,
+      availableBalance: currentBalance - amount,
     });
   } catch (error) {
     console.error('[PaymentController] requestWithdrawal Error:', error);
@@ -201,38 +219,123 @@ exports.requestWithdrawal = async (req, res) => {
   }
 };
 
-// @desc    Get current user earnings + transaction history
+// @desc    Get current user earnings + transaction history (Supports ?date=YYYY-MM-DD for Calendar)
 // @route   GET /api/payments/my-earnings
 // @access  Private
 exports.getMyEarnings = async (req, res) => {
   try {
     const userId = req.user.id;
+    const { date } = req.query; // e.g. '2026-10-27'
 
-    const user = await User.findById(userId).select('coins totalEarnedCoins totalGiftsReceived walletBalance name');
+    const user = await User.findById(userId).select('coins totalEarnedCoins totalGiftsReceived walletBalance availableBalance totalEarnings name role restaurantName businessAddress location');
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found.' });
     }
 
-    // user.coins IS the withdrawable available balance
-    // Cross-check with transactions for accuracy, but always show at least user.coins
-    const { totalReceived, totalWithdrawn, availableBalance } = await computeAvailableBalance(userId, user.coins || 0);
+    const { totalReceived, totalWithdrawn, availableBalance } = await computeAvailableBalance(userId, Math.max(user.coins || 0, user.walletBalance || 0));
 
-    // Only show gift-related and withdrawal transactions in earnings view
-    const transactions = await Transaction.find({
+    const allEarningTypes = [
+      'service_earning',
+      'delivery_earning',
+      'order_earning',
+      'gift_received',
+      'withdrawal_payout',
+      'coin_purchase',
+      'voice_call',
+      'video_call',
+      'live_token',
+      'media_unlock'
+    ];
+
+    const txFilter = {
       userId,
-      type: { $in: ['gift_received', 'withdrawal_payout', 'coin_purchase'] },
-    })
+      type: { $in: allEarningTypes },
+    };
+
+    let selectedDateStart = null;
+    let selectedDateEnd = null;
+
+    if (date && typeof date === 'string' && date.match(/^\d{4}-\d{2}-\d{2}$/)) {
+      selectedDateStart = new Date(`${date}T00:00:00.000Z`);
+      selectedDateEnd = new Date(`${date}T23:59:59.999Z`);
+      txFilter.createdAt = { $gte: selectedDateStart, $lte: selectedDateEnd };
+    }
+
+    const transactions = await Transaction.find(txFilter)
       .sort({ createdAt: -1 })
-      .limit(50);
+      .limit(100);
+
+    // Fetch real completed orders for the selected date if requested
+    let selectedDateOrders = [];
+    let selectedDateEarnings = 0;
+
+    if (selectedDateStart && selectedDateEnd) {
+      const Booking = require('../models/Booking');
+      const bookings = await Booking.find({
+        $or: [
+          { restaurantId: userId },
+          { supplierId: userId },
+          { providerId: userId },
+          { riderId: userId },
+          { partnerId: userId }
+        ],
+        status: { $in: ['COMPLETED', 'DELIVERED', 'SERVICE_COMPLETED', 'DELIVERED_SUCCESSFULLY'] },
+        createdAt: { $gte: selectedDateStart, $lte: selectedDateEnd }
+      }).sort({ createdAt: -1 }).lean();
+
+      selectedDateOrders = bookings.map((b) => {
+        const itemSum = b.supplierNet || (b.price - (b.deliveryFee || 0)) || b.price;
+        selectedDateEarnings += Number(itemSum || 0);
+        const cartList = Array.isArray(b.cartItems) ? b.cartItems : (Array.isArray(b.items) ? b.items : []);
+        return {
+          bookingId: b.bookingId,
+          orderId: b.bookingId,
+          customerName: b.customerName || 'Customer',
+          status: b.status,
+          price: b.price,
+          earnedAmount: itemSum,
+          deliveryFee: b.deliveryFee || 0,
+          itemsCount: cartList.length || 1,
+          createdAt: b.createdAt,
+          paymentMethod: b.paymentMethod || 'online',
+          paymentStatus: b.paymentStatus || 'PAID',
+        };
+      });
+    }
+
+    // Pending earnings: sum of non-completed active orders
+    const Booking = require('../models/Booking');
+    const pendingOrders = await Booking.find({
+      $or: [
+        { restaurantId: userId },
+        { supplierId: userId },
+        { providerId: userId }
+      ],
+      status: { $in: ['PENDING_RESTAURANT', 'ACCEPTED', 'PREPARING', 'FOOD_READY', 'OUT_FOR_DELIVERY'] }
+    }).select('price supplierNet deliveryFee').lean();
+
+    let pendingBalance = 0;
+    pendingOrders.forEach((p) => {
+      pendingBalance += Number(p.supplierNet || (p.price - (p.deliveryFee || 0)) || 0);
+    });
+
+    const activeBalance = Math.max(availableBalance, user.walletBalance || 0, user.availableBalance || 0);
+    const lifeTimeEarnings = Math.max(totalReceived, user.totalEarnings || 0, activeBalance + totalWithdrawn);
 
     res.json({
       success: true,
       coins: user.coins || 0,
-      totalEarnedCoins: totalReceived,
-      totalGiftsReceived: user.totalGiftsReceived || 0,
-      walletBalance: user.walletBalance || 0,
-      availableBalance,          // user.coins is source of truth
+      totalEarnedCoins: lifeTimeEarnings,
+      totalEarnings: lifeTimeEarnings,
+      walletBalance: activeBalance,
+      availableBalance: activeBalance,
+      pendingBalance,
+      pendingSettlement: pendingBalance,
       totalWithdrawn,
+      selectedDate: date || null,
+      selectedDateEarnings: Math.round(selectedDateEarnings * 100) / 100,
+      selectedDateOrdersCount: selectedDateOrders.length,
+      selectedDateOrders,
       transactions,
       minWithdrawAmount: 1,
       platformCommissionPercent: 0,

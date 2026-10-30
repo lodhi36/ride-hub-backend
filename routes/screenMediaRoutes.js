@@ -396,6 +396,57 @@ router.post('/:screenId/upload', upload.single('mediaFile'), async (req, res) =>
       }
     }
 
+    // Synchronize uploaded image with Banner collection so all images appear in Admin Banners / Media manager
+    if (mediaType === 'IMAGE') {
+      try {
+        const Banner = require('../models/Banner');
+        const targetMap = {
+          'CUSTOMER_HOME': 'USER',
+          'FOOD_BANNER': 'FOOD',
+          'FASHION_BANNER': 'FASHION',
+          'TOYS_BANNER': 'TOYS',
+          'VEGETABLES_BANNER': 'VEGETABLES',
+          'BEAUTY_BANNER': 'BEAUTY',
+          'KIRANA_BANNER': 'KIRANA',
+          'RIDER_HOME': 'RIDER',
+          'SUPPLIER_HOME': 'SUPPLIER',
+          'SPLASH_SCREEN': 'SPLASH',
+          'ROLE_SELECTION': 'ROLE_SELECTION',
+        };
+        const bannerTarget = targetMap[sid] || 'USER';
+
+        let banner = await Banner.findOne({
+          $or: [
+            { imageUrl: mediaUrl },
+            { imageUrl: mediaUrl.startsWith('/') ? mediaUrl : `/${mediaUrl}` }
+          ]
+        });
+
+        if (!banner) {
+          banner = await Banner.create({
+            imageUrl: mediaUrl,
+            target: bannerTarget,
+            status: 'Active',
+            order: 0,
+            title: screen.title || `${screen.screenName || bannerTarget} Spotlight`,
+          });
+        } else {
+          banner.status = 'Active';
+          banner.target = bannerTarget;
+          await banner.save();
+        }
+
+        const io = req.app.get('io') || global.io;
+        if (io) {
+          io.emit('banner_created', banner);
+          io.emit('banner_updated', banner);
+          io.emit('banner_change', { type: 'create', banner });
+        }
+      } catch (err) {
+        console.warn('Banner sync note:', err.message);
+      }
+    }
+
     // Broadcast socket event for real-time live synchronization
     const io = req.app.get('io') || global.io;
     if (io) {
@@ -521,6 +572,24 @@ router.delete('/:screenId', async (req, res) => {
     }
 
     const targetType = String(req.query.type || req.query.mediaType || 'ALL').toUpperCase();
+
+    // Also remove matching Banner from Banner collection
+    if (targetType === 'IMAGE' || targetType === 'ALL') {
+      try {
+        const Banner = require('../models/Banner');
+        const imgToDelete = screen.imageUrl || screen.mediaUrl;
+        if (imgToDelete) {
+          await Banner.deleteMany({
+            $or: [
+              { imageUrl: imgToDelete },
+              { imageUrl: imgToDelete.startsWith('/') ? imgToDelete : `/${imgToDelete}` }
+            ]
+          });
+        }
+      } catch (bErr) {
+        console.warn('Note deleting linked banner:', bErr.message);
+      }
+    }
 
     if (targetType === 'IMAGE') {
       if (screen.imageUrl) {

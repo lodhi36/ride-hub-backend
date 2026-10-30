@@ -150,7 +150,7 @@ app.use((req, res, next) => {
 app.use('/uploads', staticUploadsMiddleware);
 app.use('/api/uploads', staticUploadsMiddleware);
 
-// Guaranteed Static Fallback: sendFile or redirect to GitHub CDN
+// Guaranteed Static Fallback: sendFile or return 404
 app.get(['/uploads/*', '/api/uploads/*'], (req, res, next) => {
   const relPath = req.params[0];
   if (!relPath) return next();
@@ -159,7 +159,7 @@ app.get(['/uploads/*', '/api/uploads/*'], (req, res, next) => {
   if (fs.existsSync(filePath)) {
     return res.sendFile(filePath);
   }
-  return res.redirect(`https://raw.githubusercontent.com/lodhi36/ride-hub-backend/main/uploads/${relPath}`);
+  return res.status(404).send('File not found');
 });
 
 // Middleware placeholder for DB connection status check

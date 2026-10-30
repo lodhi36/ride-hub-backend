@@ -277,6 +277,50 @@ const bookingSchema = new mongoose.Schema(
       type: String,
       default: '',
     },
+    // ── Order For Someone Else (Part F Requirement 14) ──
+    isOrderingForSomeoneElse: {
+      type: Boolean,
+      default: false,
+    },
+    recipientRelationship: {
+      type: String,
+      default: 'Self', // 'Friend' | 'Wife/Family' | 'Other' | 'Self'
+    },
+    recipientName: {
+      type: String,
+      default: '',
+    },
+    recipientPhone: {
+      type: String,
+      default: '',
+    },
+    recipientAddress: {
+      type: String,
+      default: '',
+    },
+    recipientLatitude: {
+      type: Number,
+      default: null,
+    },
+    recipientLongitude: {
+      type: Number,
+      default: null,
+    },
+    // Address change audit trail (Part F Requirement 15)
+    addressChangeHistory: [
+      {
+        oldAddress: { type: String, default: '' },
+        newAddress: { type: String, default: '' },
+        oldLatitude: { type: Number, default: null },
+        oldLongitude: { type: Number, default: null },
+        newLatitude: { type: Number, default: null },
+        newLongitude: { type: Number, default: null },
+        feeDifference: { type: Number, default: 0 },
+        reason: { type: String, default: 'Customer requested' },
+        changedBy: { type: String, default: 'CUSTOMER' },
+        timestamp: { type: Date, default: Date.now },
+      },
+    ],
     pickupLocation: {
       latitude: { type: Number, default: null },
       longitude: { type: Number, default: null },
@@ -657,6 +701,8 @@ const bookingSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+bookingSchema.index({ createdAt: -1 });
+bookingSchema.index({ status: 1, createdAt: -1 });
 bookingSchema.index({ customerId: 1, createdAt: -1 });
 bookingSchema.index({ providerId: 1, createdAt: -1 });
 bookingSchema.index({ restaurantId: 1, createdAt: -1 });

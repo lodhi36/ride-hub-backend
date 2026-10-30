@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { createOrder, verifyPayment, verifyOrderPayment } = require('../controllers/razorpayController');
+const { createOrder, verifyPayment, verifyOrderPayment, depositCash } = require('../controllers/razorpayController');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 
@@ -22,5 +22,7 @@ const optionalAuth = async (req, res, next) => {
 router.post('/create-order', optionalAuth, createOrder);
 router.post('/verify', optionalAuth, verifyPayment);
 router.post('/verify-order-payment', optionalAuth, verifyOrderPayment);
+router.post('/deposit-cash', optionalAuth, depositCash);
+router.post('/verify-deposit', optionalAuth, depositCash);
 
 module.exports = router;

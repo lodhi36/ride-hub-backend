@@ -4,6 +4,7 @@ const {
   getProfileById,
   updateProfile,
   uploadPhoto,
+  uploadStorePhotos,
   updateStatus,
   updateSupplierLocation,
   getOnlineRestaurants,
@@ -94,6 +95,16 @@ router.post(
   upload.fields([{ name: 'photo', maxCount: 1 }]),
   compressImage,
   uploadPhoto
+);
+
+
+// Upload up to 5 store/restaurant photos
+router.post(
+  '/upload-store-photos',
+  optionalProtect,
+  upload.array('photos', 5),
+  compressImage,
+  uploadStorePhotos
 );
 
 module.exports = router;

@@ -204,6 +204,18 @@ const UserSchema = new mongoose.Schema({
     type: Number,
     default: 0,
   },
+  pocketBalance: {
+    type: Number,
+    default: 0,
+  },
+  cashInHand: {
+    type: Number,
+    default: 0,
+  },
+  cashLimit: {
+    type: Number,
+    default: 1500,
+  },
   totalWithdrawn: {
     type: Number,
     default: 0,
@@ -275,7 +287,6 @@ const UserSchema = new mongoose.Schema({
   },
   partnerType: {
     type: String,
-    enum: ['RESTAURANT', 'BEAUTY', 'FASHION', 'GROCERY', 'VEGETABLES', 'FRUITS', 'NAMKEEN', 'OIL_FOOD', 'STATIONERY', 'TOYS', 'BAKERY', 'ELECTRONICS', 'SERVICES', 'PHARMACY', 'STORE', 'OTHER'],
     default: 'RESTAURANT',
   },
   // Canonical Supplier Identifier (Requirement 1)
@@ -343,6 +354,10 @@ const UserSchema = new mongoose.Schema({
     default: '',
   },
   coverImage: {
+    type: String,
+    default: '',
+  },
+  image: {
     type: String,
     default: '',
   },

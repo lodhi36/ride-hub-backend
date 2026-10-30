@@ -198,10 +198,6 @@ const checkRestaurantAvailability = async (req, res) => {
     }
 
     if (!user) {
-      user = await User.findOne({ role: 'supplier' }).lean();
-    }
-
-    if (!user) {
       return res.json({
         success: true,
         restaurantId: id,
@@ -256,31 +252,36 @@ const updateProfile = async (req, res, next) => {
   try {
     let user = null;
 
-    // 1. Check req.params.id first if provided
-    let paramId = req.params.id;
-    if (paramId === 'undefined' || paramId === 'null') paramId = null;
-
-    if (paramId && mongoose.Types.ObjectId.isValid(paramId)) {
-      user = await User.findById(paramId);
-    }
-    if (!user && paramId) {
-      const targetRole = req.body.role || req.headers['x-role'] || (req.user && req.user.role);
-      const query = {
-        $or: [
-          { partnerId: paramId },
-          { supplierId: paramId },
-          { phoneNumber: paramId },
-          { phone: paramId },
-          { username: paramId },
-        ]
-      };
-      if (targetRole) query.role = String(targetRole).toLowerCase();
-      user = await User.findOne(query);
-    }
-
-    // 2. Check req.user from JWT token
-    if (!user && req.user && (req.user._id || req.user.id)) {
+    // Strict ownership: Non-admin users can ONLY update their own profile!
+    if (req.user && req.user.role !== 'admin') {
       user = await User.findById(req.user._id || req.user.id);
+    } else {
+      // 1. Check req.params.id first if provided
+      let paramId = req.params.id;
+      if (paramId === 'undefined' || paramId === 'null') paramId = null;
+
+      if (paramId && mongoose.Types.ObjectId.isValid(paramId)) {
+        user = await User.findById(paramId);
+      }
+      if (!user && paramId) {
+        const targetRole = req.body.role || req.headers['x-role'] || (req.user && req.user.role);
+        const query = {
+          $or: [
+            { partnerId: paramId },
+            { supplierId: paramId },
+            { phoneNumber: paramId },
+            { phone: paramId },
+            { username: paramId },
+          ]
+        };
+        if (targetRole) query.role = String(targetRole).toLowerCase();
+        user = await User.findOne(query);
+      }
+
+      // 2. Check req.user from JWT token
+      if (!user && req.user && (req.user._id || req.user.id)) {
+        user = await User.findById(req.user._id || req.user.id);
+      }
     }
 
     // 3. Check IDs provided in request body
@@ -315,8 +316,37 @@ const updateProfile = async (req, res, next) => {
     if (bio !== undefined) user.bio = bio;
     if (hobbies !== undefined) user.hobbies = hobbies;
     if (profilePicture !== undefined) {
-      user.profilePicture = profilePicture;
-      user.isCustomPhoto = true;
+      const cleanPhoto = typeof profilePicture === 'string' ? profilePicture.trim() : '';
+      const oldPhotoPath = user.profilePicture || user.coverImage || user.image;
+      user.profilePicture = cleanPhoto;
+      user.isCustomPhoto = Boolean(cleanPhoto);
+      user.image = cleanPhoto;
+      user.coverImage = cleanPhoto;
+      if (cleanPhoto) {
+        user.photos = [cleanPhoto];
+        user.supplierPhotos = [cleanPhoto];
+      } else {
+        user.photos = [];
+        user.supplierPhotos = [];
+        user.image = '';
+        user.coverImage = '';
+
+        // Safe local storage cleanup
+        if (oldPhotoPath && typeof oldPhotoPath === 'string' && oldPhotoPath.startsWith('/uploads/') && !oldPhotoPath.includes('..')) {
+          try {
+            const filePath = path.join(__dirname, '..', oldPhotoPath);
+            if (fs.existsSync(filePath)) {
+              fs.unlinkSync(filePath);
+              console.log(`[PHOTO DELETE] Unlinked file from storage: ${filePath}`);
+            }
+          } catch (unlinkErr) {
+            console.warn('[PHOTO UNLINK NOTICE]', unlinkErr.message);
+          }
+        }
+      }
+    }
+    if (req.body.image !== undefined) {
+      user.image = typeof req.body.image === 'string' ? req.body.image.trim() : '';
     }
     if (name !== undefined && name.trim()) {
       user.name = name.trim();
@@ -405,11 +435,54 @@ const updateProfile = async (req, res, next) => {
     if (req.body.categoryName !== undefined) {
       user.categoryName = String(req.body.categoryName).trim();
     }
+    if (req.body.supplierPhotos !== undefined) {
+      let photosArr = [];
+      if (typeof req.body.supplierPhotos === 'string') {
+        try {
+          photosArr = JSON.parse(req.body.supplierPhotos);
+        } catch (e) {
+          photosArr = req.body.supplierPhotos ? req.body.supplierPhotos.split(',').map((s) => s.trim()) : [];
+        }
+      } else if (Array.isArray(req.body.supplierPhotos)) {
+        photosArr = req.body.supplierPhotos;
+      }
+      user.supplierPhotos = photosArr.filter((p) => p && typeof p === 'string' && !p.startsWith('data:image')).slice(0, 5);
+      if (!user.coverImage && user.supplierPhotos.length > 0) {
+        user.coverImage = user.supplierPhotos[0];
+      }
+    }
+    if (req.body.photos !== undefined) {
+      if (Array.isArray(req.body.photos)) {
+        user.photos = req.body.photos.filter((p) => p && typeof p === 'string' && !p.startsWith('data:image')).slice(0, 6);
+      } else if (typeof req.body.photos === 'string' && req.body.photos.trim() === '') {
+        user.photos = [];
+      }
+    }
+    if (req.body.coverImage !== undefined && typeof req.body.coverImage === 'string') {
+      user.coverImage = req.body.coverImage.trim();
+    }
 
+    user.markModified('photos');
+    user.markModified('supplierPhotos');
     await user.save();
+
+    // Atomic direct MongoDB native update to guarantee 100% persistence of photo state
+    await mongoose.connection.db.collection('users').updateOne(
+      { _id: user._id },
+      {
+        $set: {
+          profilePicture: user.profilePicture || '',
+          coverImage: user.coverImage || '',
+          image: user.image || '',
+          photos: user.photos || [],
+          supplierPhotos: user.supplierPhotos || [],
+        }
+      }
+    );
+
     invalidateRestaurantsCache();
 
-    console.log(`[PROFILE UPDATE] User ${user._id} updated: Name='${user.name}', Lat=${user.latitude}, Lon=${user.longitude}, Loc='${user.location}'`);
+    console.log(`[PROFILE UPDATE] User ${user._id} updated: Name='${user.name}', Lat=${user.latitude}, Lon=${user.longitude}, Loc='${user.location}', Photo='${user.profilePicture}'`);
 
     const socketIO = ioInstance || req.app.get('io');
     if (socketIO) {
@@ -425,6 +498,11 @@ const updateProfile = async (req, res, next) => {
         location: user.location,
         address: user.address || user.location,
         categoryName: user.categoryName,
+        profilePicture: user.profilePicture || '',
+        coverImage: user.coverImage || '',
+        image: user.image || '',
+        photos: user.photos || [],
+        supplierPhotos: user.supplierPhotos || [],
         user,
       };
       socketIO.emit('restaurant_name_updated', payload);
@@ -432,13 +510,14 @@ const updateProfile = async (req, res, next) => {
       socketIO.emit('RESTAURANT_UPDATED', payload);
       socketIO.emit('RESTAURANT_LOCATION_UPDATED', payload);
       socketIO.emit('update_restaurant_name', payload);
-      if (user.profilePicture || user.coverImage) {
-        socketIO.emit('RESTAURANT_IMAGE_UPDATED', {
-          restaurantId: String(user._id),
-          profilePicture: user.profilePicture,
-          coverImage: user.coverImage,
-        });
-      }
+      socketIO.emit('RESTAURANT_IMAGE_UPDATED', {
+        restaurantId: String(user._id),
+        profilePicture: user.profilePicture || '',
+        coverImage: user.coverImage || '',
+        image: user.image || '',
+        photos: user.photos || [],
+        supplierPhotos: user.supplierPhotos || [],
+      });
       socketIO.emit('user_status_change', {
         userId: String(user._id),
         name: user.name,
@@ -456,7 +535,8 @@ const updateProfile = async (req, res, next) => {
       user
     });
   } catch (error) {
-    res.status(200).json({ success: true, message: 'Profile updated successfully' });
+    console.error('❌ [UPDATE PROFILE CAUGHT ERROR]:', error);
+    res.status(500).json({ success: false, message: error.message });
   }
 };
 
@@ -468,6 +548,27 @@ const uploadPhoto = async (req, res, next) => {
 
     const photoUrl = `/uploads/${req.files.photo[0].filename}`;
 
+    // Immediately persist in MongoDB if caller is authenticated
+    const targetUserId = req.user?.id || req.user?._id || req.body?.userId || req.headers['x-user-id'];
+    if (targetUserId && mongoose.Types.ObjectId.isValid(targetUserId)) {
+      try {
+        const u = await User.findById(targetUserId);
+        if (u) {
+          u.profilePicture = photoUrl;
+          u.coverImage = photoUrl;
+          u.image = photoUrl;
+          u.photos = [photoUrl];
+          u.supplierPhotos = [photoUrl];
+          u.isCustomPhoto = true;
+          await u.save();
+          invalidateRestaurantsCache();
+          console.log(`[UPLOAD PHOTO] Persisted photoUrl '${photoUrl}' immediately to user ${targetUserId}`);
+        }
+      } catch (dbErr) {
+        console.error('[UPLOAD PHOTO DB PERSIST ERROR]', dbErr);
+      }
+    }
+
     res.json({
       success: true,
       message: 'Image uploaded successfully',
@@ -478,12 +579,78 @@ const uploadPhoto = async (req, res, next) => {
   }
 };
 
+// @desc    Upload up to 5 store/restaurant photos
+// @route   POST /api/profile/upload-store-photos
+// @access  Private / Optional
+const uploadStorePhotos = async (req, res, next) => {
+  try {
+    const rawFiles = req.files;
+    let files = [];
+    if (Array.isArray(rawFiles)) {
+      files = rawFiles;
+    } else if (rawFiles && rawFiles.photos && Array.isArray(rawFiles.photos)) {
+      files = rawFiles.photos;
+    } else if (req.file) {
+      files = [req.file];
+    }
+
+    if (!files || files.length === 0) {
+      return res.status(400).json({ success: false, message: 'Please upload at least one image' });
+    }
+
+    const uploadedUrls = files.map((f) => `/uploads/${f.filename}`);
+
+    let targetUserId = (req.user && (req.user.id || req.user._id)) || req.body.userId || req.body.restaurantId || req.body.supplierId;
+    if (targetUserId) {
+      const user = await User.findById(targetUserId);
+      if (user) {
+        const existing = Array.isArray(user.supplierPhotos) ? user.supplierPhotos : [];
+        const combined = [...existing, ...uploadedUrls].slice(0, 5);
+        user.supplierPhotos = combined;
+        if (!user.coverImage && combined.length > 0) {
+          user.coverImage = combined[0];
+        }
+        await user.save();
+        invalidateRestaurantsCache();
+
+        const socketIO = ioInstance || req.app.get('io');
+        if (socketIO) {
+          socketIO.emit('RESTAURANT_IMAGES_UPDATED', {
+            restaurantId: String(user._id),
+            images: combined,
+            supplierPhotos: combined,
+            coverImage: user.coverImage,
+          });
+        }
+        return res.json({
+          success: true,
+          message: 'Store photos uploaded and saved successfully',
+          images: combined,
+          supplierPhotos: combined,
+          uploadedUrls,
+        });
+      }
+    }
+
+    return res.json({
+      success: true,
+      message: 'Store photos uploaded successfully',
+      uploadedUrls,
+    });
+  } catch (error) {
+    console.error('[UPLOAD STORE PHOTOS ERROR]', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 // @desc    Update Restaurant Online/Offline Status
 // @route   PUT /api/profile/status
 // @access  Private (Authenticated User/Restaurant)
 const updateStatus = async (req, res, next) => {
   try {
-    let targetUserId = (req.user && (req.user.id || req.user._id)) || req.body.userId || req.params.id;
+    let targetUserId = (req.user && req.user.role !== 'admin')
+      ? (req.user.id || req.user._id)
+      : ((req.user && (req.user.id || req.user._id)) || req.body.userId || req.params.id);
     let existingUser = null;
     if (targetUserId && mongoose.Types.ObjectId.isValid(targetUserId)) {
       existingUser = await User.findById(targetUserId).select('role name username address latitude longitude');
@@ -647,7 +814,7 @@ const buildRestaurantsList = async () => {
     role: { $in: ['supplier', 'restaurant', 'seller_partner', 'merchant', 'store', 'Supplier', 'Seller', 'Restaurant'] },
     isSuspended: { $ne: true },
   })
-    .select('name username restaurantName ownerName phoneNumber phone email location address fullAddress businessAddress businessLocation categoryName businessCategoryName businessCategoryId businessType business_type partnerType partnerId supplierId restaurant_status isOnline latitude longitude businessLatitude businessLongitude locationCoords currentDeviceLocation approvalStatus profilePicture coverImage rating ratingCount reviewsCount description bio openingTime closingTime createdAt')
+    .select('name username restaurantName ownerName phoneNumber phone email location address fullAddress businessAddress businessLocation categoryName businessCategoryName businessCategoryId businessType business_type partnerType partnerId supplierId restaurant_status isOnline latitude longitude businessLatitude businessLongitude locationCoords currentDeviceLocation approvalStatus profilePicture coverImage supplierPhotos photos rating ratingCount reviewsCount description bio openingTime closingTime createdAt')
     .sort({ _id: -1 })
     .lean();
 
@@ -696,21 +863,49 @@ const buildRestaurantsList = async () => {
       .filter((img) => Boolean(img && img.trim()));
     const featuredItem = items.find((i) => i.image && i.image.trim()) || items[0] || null;
 
-    const storeImage =
-      resto.coverImage ||
-      resto.profilePicture ||
-      (featuredItem && featuredItem.image ? featuredItem.image : null);
+    const candidatePhotos = [];
+    if (resto.profilePicture && typeof resto.profilePicture === 'string' && resto.profilePicture.trim() && !resto.profilePicture.startsWith('data:image')) {
+      candidatePhotos.push(resto.profilePicture.trim());
+    }
+    if (resto.coverImage && typeof resto.coverImage === 'string' && resto.coverImage.trim() && !resto.coverImage.startsWith('data:image')) {
+      candidatePhotos.push(resto.coverImage.trim());
+    }
+    if (Array.isArray(resto.supplierPhotos)) {
+      candidatePhotos.push(...resto.supplierPhotos.filter(p => typeof p === 'string' && p.trim() && !p.startsWith('data:image')));
+    }
+    if (Array.isArray(resto.photos)) {
+      candidatePhotos.push(...resto.photos.filter(p => typeof p === 'string' && p.trim() && !p.startsWith('data:image')));
+    }
+    if (itemImages && itemImages.length > 0) candidatePhotos.push(...itemImages);
+
+    const seenPhotos = new Set();
+    const storePhotos = [];
+    for (const p of candidatePhotos) {
+      if (typeof p === 'string' && p.trim() && !seenPhotos.has(p.trim())) {
+        seenPhotos.add(p.trim());
+        storePhotos.push(p.trim());
+      }
+    }
+    const finalStoreImages = storePhotos.slice(0, 5);
+    const storeImage = finalStoreImages[0] || null;
 
     const isOnlineVal = Boolean(resto.restaurant_status === 'online' || resto.isOnline === true || resto.status === 'online');
+
+    const realRating = (resto.rating !== undefined && resto.rating !== null && Number(resto.rating) > 0)
+      ? Number(Number(resto.rating).toFixed(1))
+      : null;
+    const realReviewCount = Number(resto.reviewsCount || resto.ratingCount || 0);
 
     return {
       ...resto,
       isOnline: isOnlineVal,
       restaurant_status: isOnlineVal ? 'online' : 'offline',
       image: storeImage,
-      rating: resto.rating ? Number(resto.rating) : 4.5,
-      reviewCount: resto.reviewsCount || resto.ratingCount || 0,
-      reviewsCount: resto.reviewsCount || resto.ratingCount || 0,
+      images: finalStoreImages,
+      supplierPhotos: finalStoreImages,
+      rating: realRating,
+      reviewCount: realReviewCount,
+      reviewsCount: realReviewCount,
       menuItems: items,
       itemImages,
       featuredItemImage: featuredItem && featuredItem.image ? featuredItem.image : null,
@@ -732,29 +927,134 @@ setTimeout(() => {
   }).catch((err) => console.log('[CACHE PREWARM NOTICE]', err.message));
 }, 1000);
 
-// @desc    Get all online & registered restaurants/suppliers from database with item images
+// Haversine formula to compute distance in KM between two coordinates
+function calculateHaversineDistanceKm(lat1, lon1, lat2, lon2) {
+  if (!lat1 || !lon1 || !lat2 || !lon2) return null;
+  const nLat1 = Number(lat1);
+  const nLon1 = Number(lon1);
+  const nLat2 = Number(lat2);
+  const nLon2 = Number(lon2);
+  if (isNaN(nLat1) || isNaN(nLon1) || isNaN(nLat2) || isNaN(nLon2)) return null;
+  if ((nLat1 === 0 && nLon1 === 0) || (nLat2 === 0 && nLon2 === 0)) return null;
+  if (nLat1 < -90 || nLat1 > 90 || nLon1 < -180 || nLon1 > 180) return null;
+  if (nLat2 < -90 || nLat2 > 90 || nLon2 < -180 || nLon2 > 180) return null;
+
+  const R = 6371; // Earth radius in km
+  const dLat = (nLat2 - nLat1) * (Math.PI / 180);
+  const dLon = (nLon2 - nLon1) * (Math.PI / 180);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(nLat1 * (Math.PI / 180)) *
+      Math.cos(nLat2 * (Math.PI / 180)) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  const dist = R * c;
+  return Number(dist.toFixed(2));
+}
+
+// @desc    Get all online & registered restaurants/suppliers from database with item images and 5KM distance filtering
 // @route   GET /api/profile/restaurants
 // @access  Public / Private
 const getOnlineRestaurants = async (req, res) => {
   try {
     const forceRefresh = req.query.force === 'true' || req.query.refresh === '1';
 
-    // 1. Instant Cache Hit: Return in < 1ms if cache is fresh
+    // Parse Customer Coordinates if provided (e.g. from GPS or manual address selection)
+    const rawLat = req.query.lat || req.query.latitude;
+    const rawLon = req.query.lng || req.query.lon || req.query.longitude;
+    const hasCustomerCoords = Boolean(
+      rawLat && rawLon && !isNaN(Number(rawLat)) && !isNaN(Number(rawLon)) && Number(rawLat) !== 0 && Number(rawLon) !== 0
+    );
+    const customerLat = hasCustomerCoords ? Number(rawLat) : null;
+    const customerLon = hasCustomerCoords ? Number(rawLon) : null;
+    const maxRadiusKm = Number(req.query.radius || req.query.maxDistance || 5.0);
+
+    // 1. Fetch fresh or cached base restaurants list
+    let allData = null;
     if (!forceRefresh && cachedRestaurantsData && (Date.now() - lastRestaurantsCacheTime < RESTAURANTS_CACHE_TTL)) {
-      return res.json(cachedRestaurantsData);
+      allData = cachedRestaurantsData;
+    } else {
+      const freshData = await buildRestaurantsList();
+      if (freshData && freshData.success) {
+        cachedRestaurantsData = freshData;
+        lastRestaurantsCacheTime = Date.now();
+        allData = freshData;
+      } else if (cachedRestaurantsData) {
+        allData = cachedRestaurantsData;
+      }
     }
 
-    // 2. Fetch fresh from database
-    const freshData = await buildRestaurantsList();
-    if (freshData && freshData.success) {
-      cachedRestaurantsData = freshData;
-      lastRestaurantsCacheTime = Date.now();
-      return res.json(freshData);
+    const baseList = (allData && Array.isArray(allData.restaurants)) ? allData.restaurants : [];
+
+    // 2. Location-Based 5.0 KM Filtering (when customer coordinates are provided)
+    if (hasCustomerCoords) {
+      const eligibleRestaurants = [];
+
+      for (const resto of baseList) {
+        // Extract authentic coordinates of restaurant
+        const rLat = Number(
+          resto.businessLatitude ??
+          resto.latitude ??
+          resto.locationCoords?.latitude ??
+          resto.locationCoords?.lat ??
+          0
+        );
+        const rLon = Number(
+          resto.businessLongitude ??
+          resto.longitude ??
+          resto.locationCoords?.longitude ??
+          resto.locationCoords?.lon ??
+          resto.locationCoords?.lng ??
+          0
+        );
+
+        // Strict Requirement: Restaurant coordinates missing or invalid (0 / NaN) => EXCLUDE
+        if (!rLat || !rLon || rLat === 0 || rLon === 0 || isNaN(rLat) || isNaN(rLon)) {
+          continue;
+        }
+
+        // Calculate exact Haversine distance
+        const distanceKm = calculateHaversineDistanceKm(customerLat, customerLon, rLat, rLon);
+        if (distanceKm === null || isNaN(distanceKm)) {
+          continue;
+        }
+
+        // Strict Requirement: Only restaurants within 5 KM (distanceKm <= maxRadiusKm)
+        if (distanceKm > maxRadiusKm) {
+          continue;
+        }
+
+        const distanceText = distanceKm < 1.0 ? `${Math.round(distanceKm * 1000)} m` : `${distanceKm.toFixed(1)} km`;
+        const deliveryMins = Math.max(10, Math.round(distanceKm * 5 + 10));
+        const deliveryTimeText = `${deliveryMins}-${deliveryMins + 10} min`;
+
+        eligibleRestaurants.push({
+          ...resto,
+          latitude: rLat,
+          longitude: rLon,
+          distanceKm,
+          distanceText,
+          deliveryTime: deliveryTimeText,
+          deliveryTimeText,
+        });
+      }
+
+      // Sort by distance ascending (nearest first)
+      eligibleRestaurants.sort((a, b) => (a.distanceKm || 0) - (b.distanceKm || 0));
+
+      return res.json({
+        success: true,
+        count: eligibleRestaurants.length,
+        radiusKm: maxRadiusKm,
+        customerCoords: { latitude: customerLat, longitude: customerLon },
+        restaurants: eligibleRestaurants,
+      });
     }
 
-    // Fallback to existing cache if DB fails or empty
-    if (cachedRestaurantsData) {
-      return res.json(cachedRestaurantsData);
+    // Fallback: If no coordinates supplied in query (e.g. admin or general non-geo query)
+    if (allData) {
+      return res.json(allData);
     }
 
     return res.json({ success: true, count: 0, restaurants: [] });
@@ -863,7 +1163,9 @@ const hideRestaurant = async (req, res) => {
 const updateSupplierLocation = async (req, res, next) => {
   try {
     let user = null;
-    const targetId = req.body.supplierId || req.body.partnerId || req.body.userId || req.body.restaurantId || (req.user && (req.user._id || req.user.id));
+    const targetId = (req.user && req.user.role !== 'admin')
+      ? (req.user._id || req.user.id)
+      : (req.body.supplierId || req.body.partnerId || req.body.userId || req.body.restaurantId || (req.user && (req.user._id || req.user.id)));
 
     if (targetId && mongoose.Types.ObjectId.isValid(targetId)) {
       user = await User.findById(targetId);
@@ -973,6 +1275,7 @@ module.exports = {
   getProfileById,
   updateProfile,
   uploadPhoto,
+  uploadStorePhotos,
   updateStatus,
   updateSupplierLocation,
   getOnlineRestaurants,

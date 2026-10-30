@@ -1,4 +1,5 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const { protect } = require('../middleware/authMiddleware');
 const { upload } = require('../middleware/uploadMiddleware');
 const {
@@ -27,7 +28,7 @@ const router = express.Router();
 
 // Middleware to ensure user is admin
 const adminOnly = (req, res, next) => {
-  if (req.user && req.user.isAdmin) {
+  if (req.user && (req.user.isAdmin || req.user.role === 'admin' || req.user.role === 'superadmin')) {
     next();
   } else {
     res.status(403).json({ success: false, message: 'Not authorized as an admin' });
@@ -293,5 +294,263 @@ router.get('/audit-logs', async (req, res) => {
   }
 });
 
+
+// ── Supplier Search by Registered Contact Number (Requirement 8) ──
+router.get('/supplier-search', async (req, res) => {
+  try {
+    const { phone } = req.query;
+    if (!phone || !String(phone).trim()) {
+      return res.status(400).json({ success: false, message: 'Please provide a contact number to search.' });
+    }
+
+    const raw = String(phone).trim();
+    const User = require('../models/User');
+    const Booking = require('../models/Booking');
+    const MenuItem = require('../models/MenuItem');
+    const Withdrawal = require('../models/Withdrawal');
+
+    let suppliers = [];
+    if (mongoose.Types.ObjectId.isValid(raw)) {
+      suppliers = await User.find({ _id: new mongoose.Types.ObjectId(raw) }).select('-password').lean();
+    }
+    console.log('[SUPPLIER_SEARCH]', { raw, isValid: mongoose.Types.ObjectId.isValid(raw), count: suppliers.length });
+
+    if (suppliers.length === 0) {
+      const cleanDigits = raw.replace(/\D/g, '');
+      const last10 = cleanDigits.slice(-10);
+
+      if (last10.length < 5) {
+        return res.status(400).json({ success: false, message: 'Please enter at least 5 digits of the contact number.' });
+      }
+
+      suppliers = await User.find({
+        $and: [
+          {
+            $or: [
+              { phoneNumber: { $regex: last10 } },
+              { phone: { $regex: last10 } },
+              { phoneNumber: raw },
+              { phone: raw }
+            ]
+          },
+          {
+            $or: [
+              { role: 'supplier' },
+              { restaurantName: { $exists: true, $ne: '' } },
+              { partnerType: { $exists: true } }
+            ]
+          }
+        ]
+      }).select('-password').lean();
+    }
+
+    if (suppliers.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: `No registered supplier found matching contact number "${phone}".`,
+        count: 0,
+        matches: []
+      });
+    }
+
+    // If multiple matches, return explicit disambiguation list (Requirement 8)
+    if (suppliers.length > 1) {
+      const summaryList = suppliers.map(s => ({
+        _id: s._id,
+        supplierId: s._id,
+        name: s.name || s.username,
+        storeName: s.restaurantName || s.name || 'Store',
+        phoneNumber: s.phoneNumber || s.phone,
+        businessAddress: s.businessAddress || s.location || s.address || 'Address not set',
+        role: s.role,
+        restaurant_status: s.restaurant_status || 'offline',
+        createdAt: s.createdAt,
+      }));
+      return res.json({
+        success: true,
+        disambiguation: true,
+        message: `Found ${suppliers.length} matching supplier accounts. Please select one.`,
+        count: suppliers.length,
+        matches: summaryList,
+      });
+    }
+
+    // Single matching supplier: build complete store detail view with real records
+    const supplier = suppliers[0];
+    const suppId = supplier._id;
+
+    const sIdStr = String(suppId);
+    const [orders, withdrawalsList, products] = await Promise.all([
+      Booking.find({
+        $or: [
+          { providerId: sIdStr },
+          { restaurantId: sIdStr },
+          { supplierId: sIdStr }
+        ]
+      })
+        .select('bookingId rideId price status cancellationReason customerName createdAt deliveryFee supplierNet')
+        .sort({ createdAt: -1 })
+        .limit(60)
+        .lean(),
+
+      Withdrawal.find({ userId: sIdStr })
+        .select('_id withdrawAmount status createdAt paymentMethod accountHolderName upiId')
+        .sort({ createdAt: -1 })
+        .limit(30)
+        .lean(),
+
+      MenuItem.find({
+        $or: [{ restaurantId: suppId }, { restaurantId: sIdStr }]
+      })
+        .select('_id name price mrp category image isAvailable demographic')
+        .sort({ createdAt: -1 })
+        .limit(60)
+        .lean()
+    ]);
+
+    const totalOrders = orders.length;
+    const completedOrdersList = orders.filter(o => 
+      ['COMPLETED', 'DELIVERED', 'SERVICE_COMPLETED', 'DELIVERED_SUCCESSFULLY'].includes(String(o.status || '').toUpperCase())
+    );
+    const completedOrders = completedOrdersList.length;
+
+    const cancelledOrdersList = orders.filter(o => 
+      ['CANCELLED', 'TIMEOUT', 'RESTAURANT_DECLINED', 'NO_RESPONSE'].includes(String(o.status || '').toUpperCase()) ||
+      String(o.status || '').toUpperCase().includes('CANCEL')
+    );
+    const cancelledOrders = cancelledOrdersList.length;
+
+    let totalEarnings = 0;
+    completedOrdersList.forEach(o => {
+      const earned = o.supplierNet || (o.price - (o.deliveryFee || 0)) || o.price || 0;
+      totalEarnings += Number(earned);
+    });
+
+    const inProgressList = orders.filter(o => 
+      ['PENDING_RESTAURANT', 'ACCEPTED', 'PREPARING', 'FOOD_READY', 'OUT_FOR_DELIVERY', 'STARTED'].includes(String(o.status || '').toUpperCase())
+    );
+    let pendingSettlement = 0;
+    inProgressList.forEach(o => {
+      const earned = o.supplierNet || (o.price - (o.deliveryFee || 0)) || o.price || 0;
+      pendingSettlement += Number(earned);
+    });
+
+    res.json({
+      success: true,
+      disambiguation: false,
+      supplier: {
+        _id: supplier._id,
+        supplierId: supplier._id,
+        name: supplier.name || supplier.username,
+        storeName: supplier.restaurantName || supplier.name || 'Store',
+        phoneNumber: supplier.phoneNumber || supplier.phone,
+        email: supplier.email || 'N/A',
+        storeAddress: supplier.businessAddress || supplier.location || supplier.address || 'Address not specified',
+        upiId: supplier.upiId || 'N/A',
+        accountStatus: supplier.isBlocked ? 'Blocked' : (supplier.isVerified ? 'Verified' : 'Active'),
+        restaurant_status: supplier.restaurant_status || (supplier.isOnline ? 'online' : 'offline'),
+        walletBalance: supplier.walletBalance || supplier.availableBalance || 0,
+        createdAt: supplier.createdAt,
+      },
+      metrics: {
+        totalOrders,
+        completedOrders,
+        cancelledOrders,
+        totalEarnings: Math.round(totalEarnings * 100) / 100,
+        pendingSettlement: Math.round(pendingSettlement * 100) / 100,
+        totalProducts: products.length,
+        totalWithdrawals: withdrawalsList.length,
+      },
+      products,
+      orders: orders.slice(0, 30),
+      withdrawals: withdrawalsList,
+    });
+  } catch (error) {
+    console.error('[supplier-search] Error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// ── Separate Order Sections & Real-Time Details (Requirement 9) ──
+router.get('/orders', async (req, res) => {
+  try {
+    const { view, search, date } = req.query;
+    const Booking = require('../models/Booking');
+
+    const filters = [];
+
+    if (view === 'cancelled') {
+      filters.push({
+        $or: [
+          { status: { $regex: 'CANCEL', $options: 'i' } },
+          { status: { $in: ['TIMEOUT', 'RESTAURANT_DECLINED', 'NO_RESPONSE', 'CANCELLED_BY_CUSTOMER', 'CANCELLED_BY_RESTAURANT'] } },
+          { deliveryStatus: 'CANCELLED' }
+        ]
+      });
+    } else if (view === 'completed') {
+      filters.push({
+        status: { $in: ['COMPLETED', 'DELIVERED', 'SERVICE_COMPLETED', 'DELIVERED_SUCCESSFULLY'] }
+      });
+    } else if (view === 'supplier') {
+      filters.push({
+        $or: [
+          { restaurantId: { $ne: null } },
+          { supplierId: { $ne: null } },
+          { partnerId: { $ne: null } },
+          { bookingType: 'food' }
+        ]
+      });
+    } else if (view === 'customer') {
+      filters.push({
+        $or: [
+          { customerId: { $ne: null } },
+          { customerPhone: { $ne: null } }
+        ]
+      });
+    }
+
+    if (date && date.match(/^\d{4}-\d{2}-\d{2}$/)) {
+      const startOfDay = new Date(`${date}T00:00:00.000Z`);
+      const endOfDay = new Date(`${date}T23:59:59.999Z`);
+      filters.push({ createdAt: { $gte: startOfDay, $lte: endOfDay } });
+    }
+
+    if (search && String(search).trim()) {
+      const q = String(search).trim();
+      const searchRegex = new RegExp(q, 'i');
+      filters.push({
+        $or: [
+          { bookingId: searchRegex },
+          { rideId: searchRegex },
+          { restaurantName: searchRegex },
+          { customerName: searchRegex },
+          { customerPhone: searchRegex },
+          { providerName: searchRegex },
+          { providerPhone: searchRegex }
+        ]
+      });
+    }
+
+    const finalQuery = filters.length > 0 ? { $and: filters } : {};
+
+    const orders = await Booking.find(finalQuery)
+      .select('bookingId rideId customerId customerName customerPhone restaurantName serviceName pickupAddress deliveryAddress providerName providerPhone price paymentMethod paymentStatus status cancellationReason refundStatus cartItems items createdAt')
+      .sort({ createdAt: -1 })
+      .limit(60)
+      .lean();
+
+    res.json({
+      success: true,
+      view: view || 'all',
+      count: orders.length,
+      orders,
+    });
+  } catch (error) {
+    console.error('[admin/orders] Error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 module.exports = router;
+
 

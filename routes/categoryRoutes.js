@@ -59,6 +59,19 @@ router.post('/seed-defaults', async (req, res) => {
   }
 });
 
+// Admin / Merchant: Upload subcategory or category image
+router.post('/upload-image', upload.single('image'), compressImage, (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: 'No image uploaded' });
+    }
+    const imageUrl = `/uploads/${req.file.filename}`;
+    res.json({ success: true, imageUrl, filename: req.file.filename });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // Admin: Add new category or update if name matches
 router.post('/', upload.single('image'), compressImage, async (req, res) => {
   try {
@@ -97,7 +110,8 @@ router.post('/', upload.single('image'), compressImage, async (req, res) => {
               price: Number(s.price) || 199,
               isActive: s.isActive !== false,
               description: s.description || '',
-              icon: s.icon || 'sparkles-outline'
+              icon: s.icon || 'sparkles-outline',
+              image: s.image || ''
             }));
         }
       } catch (e) {
@@ -154,7 +168,8 @@ router.put('/:id', upload.single('image'), compressImage, async (req, res) => {
               price: Number(s.price) || 199,
               isActive: s.isActive !== false,
               description: s.description || '',
-              icon: s.icon || 'sparkles-outline'
+              icon: s.icon || 'sparkles-outline',
+              image: s.image || ''
             }));
         }
       } catch (e) {

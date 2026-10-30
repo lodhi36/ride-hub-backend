@@ -97,7 +97,7 @@ async function calculateRestaurantRating(restaurantId) {
   formattedReviews.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
   const totalReviews = formattedReviews.length;
-  const averageRating = totalReviews > 0 ? parseFloat((totalScore / totalReviews).toFixed(1)) : 4.8;
+  const averageRating = totalReviews > 0 ? parseFloat((totalScore / totalReviews).toFixed(1)) : null;
 
   return { formattedReviews, averageRating, totalReviews };
 }

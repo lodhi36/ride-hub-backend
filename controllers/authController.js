@@ -714,7 +714,11 @@ const getPartnerProfile = async (req, res, next) => {
       businessLongitude: user.businessLongitude || user.longitude,
       categoryName: user.categoryName || user.businessCategoryName,
       businessCategoryName: user.businessCategoryName || user.categoryName,
-      profilePicture: user.profilePicture,
+      profilePicture: user.profilePicture || '',
+      coverImage: user.coverImage || user.profilePicture || '',
+      image: user.image || user.profilePicture || '',
+      photos: Array.isArray(user.photos) ? user.photos.filter((p) => typeof p === 'string' && !p.startsWith('data:image')) : [],
+      supplierPhotos: Array.isArray(user.supplierPhotos) ? user.supplierPhotos.filter((p) => typeof p === 'string' && !p.startsWith('data:image')) : [],
     };
 
     res.json({

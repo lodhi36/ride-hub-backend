@@ -39,7 +39,7 @@ function getDistanceFromLatLonInKm(lat1, lon1, lat2, lon2) {
 
 let _ioInstance = null;
 
-const scheduleSupplierOrderDispatch = (payload, delayMs = 20000) => {
+const scheduleSupplierOrderDispatch = (payload, delayMs = 0) => {
   if (!payload) return;
   const bId = payload.bookingId || payload.rideId;
   const cId = payload.customerId ? String(payload.customerId) : '';
@@ -53,43 +53,36 @@ const scheduleSupplierOrderDispatch = (payload, delayMs = 20000) => {
     global.activeSupplierDispatchTimers.delete(bId);
   }
 
-  console.log(`⏳ [20-SECOND SUPPLIER DELAY] Scheduling order #${bId} for supplier dispatch in ${delayMs / 1000}s`);
+  console.log(`📢 [INSTANT SUPPLIER DISPATCH] Dispatching order #${bId} to suppliers (delay: ${delayMs}ms)`);
 
-  const timer = setTimeout(async () => {
+  const doDispatch = async () => {
     try {
       if (bId) global.activeSupplierDispatchTimers.delete(bId);
 
-      // Check DB to ensure order was not cancelled during the 20-second window
-      if (bId) {
-        const fresh = await Booking.findOne({ bookingId: bId }).lean();
-        if (fresh) {
-          const st = (fresh.status || '').toUpperCase();
-          if (st.includes('CANCEL') || st === 'TIMEOUT' || st === 'NO_RESPONSE' || st === 'RESTAURANT_DECLINED') {
-            console.log(`⏱️ [20S DELAY ABORTED] Order #${bId} was cancelled (${st}) during 20s window. Aborting supplier dispatch.`);
-            return;
-          }
-        }
-      }
-
       if (!_ioInstance) {
-        console.log(`⚠️ [20S DELAY] _ioInstance is null, cannot dispatch order #${bId}`);
+        console.log(`⚠️ [SUPPLIER DISPATCH] _ioInstance is null, cannot dispatch order #${bId}`);
         return;
       }
 
-      console.log(`📢 [20S DELAY EXPIRED - DISPATCHING] Order #${bId} is now being dispatched to supplier partner rooms!`);
+      console.log(`📢 [DISPATCHING] Order #${bId} is now being dispatched to supplier partner rooms!`);
       await dispatchBookingToEligibleSuppliers(_ioInstance, payload);
     } catch (e) {
-      console.error(`[20S DELAY ERROR] Failed dispatch for #${bId}:`, e.message);
+      console.error(`[SUPPLIER DISPATCH ERROR] Failed dispatch for #${bId}:`, e.message);
     }
-  }, delayMs);
+  };
 
-  if (bId) {
-    global.activeSupplierDispatchTimers.set(bId, timer);
+  if (delayMs <= 0) {
+    setImmediate(doDispatch);
+  } else {
+    const timer = setTimeout(doDispatch, delayMs);
+    if (bId) {
+      global.activeSupplierDispatchTimers.set(bId, timer);
+    }
   }
 };
 
 const dispatchBookingToEligibleSuppliers = async (io, payload) => {
-  if (!payload) return { eligibleCount: 0 };
+  if (!payload || !io) return { eligibleCount: 0 };
   const bId = payload.bookingId || payload.rideId;
   const cId = payload.customerId ? String(payload.customerId) : 'cust_unknown';
   const targetSupplierId = payload.restaurantId || payload.supplierId || payload.partnerId || payload.providerId;
@@ -110,11 +103,6 @@ const dispatchBookingToEligibleSuppliers = async (io, payload) => {
     const sIdStr = resolveSupplierIdentity(targetSupplierId);
     const rooms = getSupplierSocketRooms(sIdStr);
     for (const rm of rooms) {
-      // STRICT ROLE ISOLATION: NEVER emit supplier order request to customer rooms!
-      if (cId && (rm === cId || rm === `user_${cId}` || rm === `customer_${cId}`)) {
-        console.log(`🛡️ [DISPATCH GUARD] Skipping customer room ${rm} for order #${bId}`);
-        continue;
-      }
       io.to(rm).emit('new_food_order', payload);
       io.to(rm).emit('new_order', payload);
       io.to(rm).emit('new_booking_request', payload);
@@ -125,14 +113,21 @@ const dispatchBookingToEligibleSuppliers = async (io, payload) => {
       io.to(rm).emit('FOOD_ORDER', payload);
     }
     eligibleCount++;
-    console.log(`📢 [SUPPLIER DIRECT DISPATCH] Order ${bId} sent exclusively to supplier rooms for ${sIdStr}`);
-  } else {
-    // Fallback broadcast only to online suppliers
-    io.to('online_suppliers').emit('new_food_order', payload);
-    io.to('online_suppliers').emit('new_ride_request', payload);
-    io.to('online_suppliers').emit('ride_request', payload);
-    io.to('online_suppliers').emit('service_request', payload);
+    console.log(`📢 [SUPPLIER DIRECT DISPATCH] Order ${bId} sent to supplier rooms for ${sIdStr}`);
   }
+
+  // Always emit to general supplier channels so active suppliers on screen receive it
+  io.to('online_suppliers').emit('new_food_order', payload);
+  io.to('online_suppliers').emit('new_order', payload);
+  io.to('online_suppliers').emit('new_booking_request', payload);
+  io.to('online_suppliers').emit('new_ride_request', payload);
+  io.to('online_suppliers').emit('ride_request', payload);
+  io.to('online_suppliers').emit('service_request', payload);
+  io.to('online_suppliers').emit('FOOD_ORDER', payload);
+  io.to('suppliers_room').emit('new_food_order', payload);
+  io.to('suppliers_room').emit('new_order', payload);
+  io.to('suppliers_room').emit('new_booking_request', payload);
+  io.to('suppliers_room').emit('FOOD_ORDER', payload);
 
   io.to('admin_tracking').emit('new_ride_request', payload);
   console.log(`📢 [MATCHING RESULT] Order dispatched to Supplier role rooms.\n`);
@@ -314,7 +309,31 @@ const socketHandler = (io) => {
           }).catch(e => console.error('[rider_location_update] DB error:', e.message));
         }
 
-        const bId = data.bookingId || data.rideId || data.orderId;
+        let bId = data.bookingId || data.rideId || data.orderId;
+        let customerId = data.customerId || data.userId;
+
+        // Auto-lookup active booking for rider if not explicitly passed
+        if (!bId) {
+          try {
+            const activeBooking = await Booking.findOne({
+              $or: [
+                { 'acceptedBy.riderId': riderIdStr },
+                { 'rider.riderId': riderIdStr },
+                { riderId: riderIdStr },
+                { 'acceptedBy.userId': riderIdStr },
+                { driverId: riderIdStr }
+              ],
+              status: { $in: ['ACCEPTED', 'ASSIGNED', 'ARRIVED_AT_STORE', 'ORDER_CONFIRMED', 'PICKED_UP', 'IN_TRANSIT', 'OUT_FOR_DELIVERY', 'STARTED', 'ARRIVED'] }
+            }).select('_id bookingId customerId userId').lean();
+
+            if (activeBooking) {
+              bId = activeBooking.bookingId || activeBooking._id?.toString();
+              customerId = customerId || activeBooking.customerId || activeBooking.userId;
+            }
+          } catch (e) {
+            console.error('[rider_location_update] Active booking lookup error:', e.message);
+          }
+        }
 
         // Live Real-Time GPS Broadcast payload
         const locationPayload = {
@@ -322,6 +341,7 @@ const socketHandler = (io) => {
           providerId: riderIdStr,
           bookingId: bId || undefined,
           rideId: bId || undefined,
+          orderId: bId || undefined,
           name: existing.name || data.name || 'Rider',
           latitude: lat,
           longitude: lon,
@@ -333,7 +353,7 @@ const socketHandler = (io) => {
           timestamp: Date.now(),
         };
 
-        // If active booking ID is provided, emit to booking specific rooms
+        // If active booking ID is provided or resolved, emit to booking specific rooms & customer
         if (bId) {
           const bIdStr = bId.toString();
           io.to(`booking_${bIdStr}`).emit('rider_location_update', locationPayload);
@@ -342,6 +362,13 @@ const socketHandler = (io) => {
           io.to(`order_${bIdStr}`).emit('rider_location_update', locationPayload);
           io.to(`order_${bIdStr}`).emit('rider_location_updated', locationPayload);
           io.emit(`provider_location_${bIdStr}`, locationPayload);
+
+          if (customerId) {
+            const custIdStr = customerId.toString();
+            io.to(`user_${custIdStr}`).emit('rider_location_update', locationPayload);
+            io.to(`user_${custIdStr}`).emit('rider_location_updated', locationPayload);
+            io.to(`customer_${custIdStr}`).emit('rider_location_update', locationPayload);
+          }
 
           // Update active booking in DB with fresh driver coordinates
           Booking.findOneAndUpdate(

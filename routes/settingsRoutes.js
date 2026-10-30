@@ -375,18 +375,26 @@ router.all('/fashion-demographics', fashionUpload, compressImage, async (req, re
 
     // Direct demographic target if uploaded with generic 'image' and 'target' = 'men'|'women'|'kids'
     if (b.target && req.files && req.files.image && req.files.image[0]) {
-      const t = String(b.target).toLowerCase();
-      if (t.includes('men')) updated.men = `/uploads/${req.files.image[0].filename}`;
-      else if (t.includes('women')) updated.women = `/uploads/${req.files.image[0].filename}`;
-      else if (t.includes('kid') || t.includes('child')) updated.kids = `/uploads/${req.files.image[0].filename}`;
+      const t = String(b.target).trim().toLowerCase();
+      if (t === 'women' || t.includes('women') || t.includes('female')) {
+        updated.women = `/uploads/${req.files.image[0].filename}`;
+      } else if (t === 'men' || t.includes('male')) {
+        updated.men = `/uploads/${req.files.image[0].filename}`;
+      } else if (t.includes('kid') || t.includes('child')) {
+        updated.kids = `/uploads/${req.files.image[0].filename}`;
+      }
     }
 
     // Handle removal of specific demographic image
     if ((b.removeImage === true || b.removeImage === 'true') && b.target) {
-      const t = String(b.target).toLowerCase();
-      if (t.includes('men')) updated.men = '';
-      else if (t.includes('women')) updated.women = '';
-      else if (t.includes('kid') || t.includes('child')) updated.kids = '';
+      const t = String(b.target).trim().toLowerCase();
+      if (t === 'women' || t.includes('women') || t.includes('female')) {
+        updated.women = '';
+      } else if (t === 'men' || t.includes('male')) {
+        updated.men = '';
+      } else if (t.includes('kid') || t.includes('child')) {
+        updated.kids = '';
+      }
     }
 
     if (b.menUrl !== undefined) updated.men = b.menUrl;

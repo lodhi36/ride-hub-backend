@@ -1,59 +1,54 @@
 const mongoose = require('mongoose');
-const dotenv = require('dotenv');
-dotenv.config();
+require('dotenv').config();
 
-const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/datingapp';
+const uri = process.env.MONGODB_URI;
 
-async function checkRealData() {
-  try {
-    await mongoose.connect(MONGO_URI);
-    console.log('Connected to DB:', MONGO_URI);
-    const db = mongoose.connection.db;
-    
-    // Check users collection
-    const users = await db.collection('users').find({}).toArray();
-    console.log('\n==========================================');
-    console.log('       REAL DATABASE RECORDS IN MONGODB    ');
-    console.log('==========================================');
-    console.log('Total Raw Users in DB:', users.length);
-    
-    const riders = users.filter(u => u.role === 'rider' || u.role === 'delivery_partner' || u.partnerId || u.vehicleType);
-    const suppliers = users.filter(u => u.role === 'supplier' || u.role === 'restaurant' || u.restaurantName || u.businessCategoryName);
-    const customers = users.filter(u => !riders.includes(u) && !suppliers.includes(u) && u.role !== 'admin');
-    
-    console.log(`\n🏍️ REAL RIDERS COUNT: ${riders.length}`);
-    riders.forEach((r, i) => {
-      console.log(`[Rider #${i+1}] Name: ${r.name || r.fullName || 'N/A'} | Phone: ${r.phoneNumber || r.phone || 'N/A'} | isOnline: ${Boolean(r.isOnline)} | rider_status: ${r.rider_status || 'offline'} | Zone: ${r.selectedZone || r.zone || 'None'} | Vehicle: ${r.vehicleType || 'Bike'} | Coordinates: ${JSON.stringify(r.location?.coordinates || r.coordinates || [])}`);
-    });
-    
-    console.log(`\n🏪 REAL SUPPLIERS/STORES COUNT: ${suppliers.length}`);
-    suppliers.forEach((s, i) => {
-      console.log(`[Supplier #${i+1}] Store: ${s.restaurantName || s.name || 'N/A'} | Phone: ${s.phoneNumber || s.phone || 'N/A'} | Category: ${s.businessCategoryName || s.categoryName || 'N/A'} | isOnline: ${Boolean(s.isOnline)} | restaurant_status: ${s.restaurant_status || 'offline'} | Approval: ${s.approvalStatus || 'APPROVED'}`);
-    });
+mongoose.connect(uri).then(async () => {
+  const items = await mongoose.connection.collection('menuitems').find({}).toArray();
+  console.log('MenuItems count:', items.length);
+  items.slice(0, 10).forEach(i => console.log('Item:', i.name, '| Store:', i.restaurantId, '| Img:', i.image));
+  
+  const rest = await mongoose.connection.collection('restaurants').find({}).toArray();
+  console.log('Restaurants count:', rest.length);
+  rest.forEach(r => console.log('Rest:', r.name || r.restaurantName, '| ID:', r._id, '| Cat:', r.categoryName));
 
-    console.log(`\n👤 REAL CUSTOMERS / ACTIVE USERS COUNT: ${customers.length}`);
-    customers.slice(0, 15).forEach((c, i) => {
-      console.log(`[Customer #${i+1}] Name: ${c.name || c.username || 'User'} | Phone: ${c.phoneNumber || c.phone || 'N/A'} | isOnline: ${Boolean(c.isOnline)} | Role: ${c.role || 'customer'}`);
-    });
-
-    // Check partners collection
-    const partnerCol = await db.collection('partners').find({}).toArray();
-    if (partnerCol.length > 0) {
-      console.log(`\n🏍️ PARTNERS COLLECTION: ${partnerCol.length}`);
-      partnerCol.forEach(p => console.log(`- Partner: ${p.name || p.fullName} | Phone: ${p.phone || p.phoneNumber} | Online: ${p.isOnline}`));
-    }
-
-    // Check restaurants collection
-    const restoCol = await db.collection('restaurants').find({}).toArray();
-    if (restoCol.length > 0) {
-      console.log(`\n🏪 RESTAURANTS COLLECTION: ${restoCol.length}`);
-      restoCol.forEach(r => console.log(`- Restaurant: ${r.name || r.restaurantName} | Phone: ${r.phone || r.phoneNumber} | Online: ${r.isOnline}`));
-    }
-
-    process.exit(0);
-  } catch (err) {
-    console.error('Error:', err);
-    process.exit(1);
+  const screens = await mongoose.connection.collection('screenmedias').find({}).toArray();
+  console.log('Total ScreenMedias count before dedup:', screens.length);
+  
+  // Group by screenId
+  const byId = {};
+  for (const s of screens) {
+    if (!byId[s.screenId]) byId[s.screenId] = [];
+    byId[s.screenId].push(s);
   }
-}
-checkRealData();
+
+  for (const sid of Object.keys(byId)) {
+    const list = byId[sid];
+    if (list.length > 1) {
+      console.log(`Found ${list.length} records for ${sid}`);
+      // Find the best record (one with imageUrl or lottieUrl)
+      list.sort((a, b) => {
+        const aScore = (a.imageUrl ? 10 : 0) + (a.lottieUrl ? 5 : 0) + (new Date(a.updatedAt || 0).getTime() / 1e12);
+        const bScore = (b.imageUrl ? 10 : 0) + (b.lottieUrl ? 5 : 0) + (new Date(b.updatedAt || 0).getTime() / 1e12);
+        return bScore - aScore;
+      });
+      const best = list[0];
+      const toDelete = list.slice(1);
+      for (const d of toDelete) {
+        await mongoose.connection.collection('screenmedias').deleteOne({ _id: d._id });
+        console.log(`Deleted duplicate for ${sid}: ${d._id}`);
+      }
+    }
+  }
+
+  const remaining = await mongoose.connection.collection('screenmedias').find({}).toArray();
+  console.log('Total ScreenMedias count after dedup:', remaining.length);
+  remaining.forEach(s => {
+    console.log('ScreenId:', s.screenId, '| Image:', s.imageUrl, '| Lottie:', s.lottieUrl, '| Display:', s.displayMode);
+  });
+
+  process.exit(0);
+}).catch(err => {
+  console.error(err);
+  process.exit(1);
+});

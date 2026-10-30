@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 const Booking = require('../models/Booking');
 const User = require('../models/User');
 const Zone = require('../models/Zone');
+const MenuItem = require('../models/MenuItem');
 const jwt = require('jsonwebtoken');
 const socketHandlerObj = require('../sockets/socketHandler');
 const riderSearchService = require('../services/riderSearchService');
@@ -170,12 +171,41 @@ const redactDropLocationForRider = (bookingObj, isRiderContext = false) => {
   const deliveryStatus = (bookingObj.deliveryStatus || '').toUpperCase();
   const riderStatus = (bookingObj.riderStatus || '').toUpperCase();
 
-  const isPickedUp = ['PICKED_UP', 'OUT_FOR_DELIVERY', 'STARTED', 'SERVICE_STARTED', 'FOOD_PICKED_UP', 'REACHED_CUSTOMER', 'DELIVERED', 'COMPLETED', 'SERVICE_COMPLETED'].includes(status) ||
-                     ['OUT_FOR_DELIVERY', 'PICKED_UP', 'FOOD_PICKED_UP', 'DELIVERED', 'COMPLETED'].includes(deliveryStatus) ||
-                     ['OUT_FOR_DELIVERY', 'FOOD_PICKED_UP', 'REACHED_CUSTOMER', 'DELIVERED', 'COMPLETED'].includes(riderStatus);
+  const isPastOrder = ['DELIVERED', 'COMPLETED', 'SERVICE_COMPLETED', 'DELIVERED_SUCCESSFULLY', 'CANCELLED', 'RESTAURANT_DECLINED'].includes(status) ||
+                      ['DELIVERED', 'COMPLETED', 'CANCELLED'].includes(deliveryStatus) ||
+                      ['DELIVERED', 'COMPLETED', 'CANCELLED'].includes(riderStatus) ||
+                      Boolean(bookingObj.cancelledAt);
+
+  const concealedCopy = (typeof bookingObj.toObject === 'function') ? bookingObj.toObject() : { ...bookingObj };
+
+  // Rule 1: Past / Completed / Cancelled rides: NEVER leak customer personal info to rider
+  if (isPastOrder) {
+    concealedCopy.customerName = 'Customer';
+    concealedCopy.customerPhone = 'Concealed (Completed Delivery)';
+    concealedCopy.customerAddress = 'Concealed (Completed Delivery)';
+    concealedCopy.destinationAddress = 'Concealed (Completed Delivery)';
+    concealedCopy.deliveryAddress = 'Concealed (Completed Delivery)';
+    concealedCopy.serviceAddress = 'Concealed (Completed Delivery)';
+    concealedCopy.destinationLatitude = null;
+    concealedCopy.destinationLongitude = null;
+    concealedCopy.customerLatitude = null;
+    concealedCopy.customerLongitude = null;
+    concealedCopy.dropLocation = null;
+    return concealedCopy;
+  }
+
+  // Rule 2: Active / Running rides: Mask to First Name + Last Initial
+  if (concealedCopy.customerName) {
+    const parts = concealedCopy.customerName.trim().split(/\s+/);
+    concealedCopy.customerName = parts.length > 1 ? `${parts[0]} ${parts[1][0]}.` : parts[0];
+  }
+
+  // Rule 3: Before pickup, drop location is concealed until rider collects order
+  const isPickedUp = ['PICKED_UP', 'OUT_FOR_DELIVERY', 'FOOD_PICKED_UP', 'REACHED_CUSTOMER'].includes(status) ||
+                     ['OUT_FOR_DELIVERY', 'PICKED_UP', 'FOOD_PICKED_UP'].includes(deliveryStatus) ||
+                     ['OUT_FOR_DELIVERY', 'FOOD_PICKED_UP', 'REACHED_CUSTOMER'].includes(riderStatus);
 
   if (!isPickedUp) {
-    const concealedCopy = (typeof bookingObj.toObject === 'function') ? bookingObj.toObject() : { ...bookingObj };
     concealedCopy.destinationAddress = 'Concealed until order pickup';
     concealedCopy.customerAddress = 'Concealed until order pickup';
     concealedCopy.deliveryAddress = 'Concealed until order pickup';
@@ -184,9 +214,9 @@ const redactDropLocationForRider = (bookingObj, isRiderContext = false) => {
     concealedCopy.customerLatitude = null;
     concealedCopy.customerLongitude = null;
     concealedCopy.dropLocation = null;
-    return concealedCopy;
   }
-  return bookingObj;
+
+  return concealedCopy;
 };
 
 // Calculate exact food items earning for restaurant (excluding rider delivery fee)
@@ -210,6 +240,15 @@ const getOrderRestaurantEarning = (b) => {
 // Calculate exact delivery amount paid by customer for rider earning
 const getOrderRiderEarning = (b) => {
   if (!b) return 0;
+  const st = String(b.status || '').toUpperCase();
+  const dst = String(b.deliveryStatus || '').toUpperCase();
+  const rst = String(b.riderStatus || '').toUpperCase();
+  // Only completed/delivered rides count towards earnings. Cancelled or incomplete orders MUST NOT count.
+  const isDone = st === 'COMPLETED' || st === 'DELIVERED' || st === 'SERVICE_COMPLETED' || st === 'DELIVERED_SUCCESSFULLY' || dst === 'COMPLETED' || dst === 'DELIVERED' || rst === 'DELIVERED' || rst === 'COMPLETED';
+  const isCanc = st.includes('CANCEL') || dst.includes('CANCEL') || rst.includes('CANCEL') || b.cancelledAt || st === 'RESTAURANT_DECLINED';
+  if (!isDone || isCanc) {
+    return 0;
+  }
   const fee = Number(b.deliveryFee);
   if (!isNaN(fee) && fee > 0) return fee;
   const tripPay = Number(b.totalTripPay || b.deliveryCharge || b.estimatedEarning);
@@ -402,7 +441,7 @@ exports.createBooking = async (req, res) => {
           ? User.findById(targetStoreId).lean()
           : Promise.resolve(null),
         Booking.findOne({
-          customerId: customerId,
+          customerId: resolvedCustomerId,
           bookingId: { $ne: newBookingId },
           status: { $in: activeFoodStatuses }
         }).lean()
@@ -434,6 +473,44 @@ exports.createBooking = async (req, res) => {
             error: `Aapka ek order (#${existingActive.bookingId}) pehle se chal raha hai. Pehla order complete hone ke baad hi naya order kar sakte hain.`,
             message: `You already have an active food order (#${existingActive.bookingId}) in progress. Please wait for it to complete before placing a new order.`
           });
+        }
+      }
+    }
+
+    // MANDATORY REQUIREMENT 5: Prevent deleted or unavailable products from being ordered
+    if (cartItems || req.body.cart) {
+      const rawCartList = cartItems || req.body.cart;
+      const cList = Array.isArray(rawCartList) ? rawCartList : (rawCartList.items || Object.values(rawCartList));
+      if (Array.isArray(cList) && cList.length > 0) {
+        const itemIds = cList
+          .map(it => it.id || it.itemId || it._id)
+          .filter(id => id && mongoose.Types.ObjectId.isValid(id));
+        if (itemIds.length > 0) {
+          const existingMenuItems = await MenuItem.find({ _id: { $in: itemIds } }).lean();
+          const itemMap = new Map();
+          for (const emi of existingMenuItems) {
+            itemMap.set(emi._id.toString(), emi);
+          }
+          const unavailableNames = [];
+          for (const it of cList) {
+            const itId = (it.id || it.itemId || it._id || '').toString();
+            if (mongoose.Types.ObjectId.isValid(itId)) {
+              const matched = itemMap.get(itId);
+              if (!matched) {
+                unavailableNames.push(it.name || it.title || 'Unknown item (deleted)');
+              } else if (matched.isAvailable === false) {
+                unavailableNames.push(matched.name || it.name || 'Unavailable item');
+              }
+            }
+          }
+          if (unavailableNames.length > 0) {
+            console.log(`🚫 [DELETED/UNAVAILABLE ITEM BLOCKED] Order prevented due to unavailable items: ${unavailableNames.join(', ')}`);
+            return res.status(400).json({
+              success: false,
+              error: `The following item(s) are no longer available: ${unavailableNames.join(', ')}. Please update your cart before proceeding.`,
+              message: `The following item(s) are no longer available: ${unavailableNames.join(', ')}. Please update your cart before proceeding.`
+            });
+          }
         }
       }
     }
@@ -497,14 +574,16 @@ exports.createBooking = async (req, res) => {
       }
     }
 
-    if (!canonicalSupplierId && isFood) {
+    if ((!canonicalSupplierId || String(canonicalSupplierId) === String(resolvedCustomerId)) && isFood) {
       try {
-        const supp = (await User.findOne({ role: 'supplier', isOnline: true }).lean()) || (await User.findOne({ role: 'supplier' }).lean());
+        const supp = (await User.findOne({ _id: { $ne: resolvedCustomerId }, role: 'supplier', isOnline: true }).lean()) || 
+                     (await User.findOne({ _id: { $ne: resolvedCustomerId }, role: 'supplier' }).lean()) ||
+                     (await User.findOne({ _id: { $ne: resolvedCustomerId }, partnerType: { $exists: true, $ne: '' } }).lean());
         if (supp) {
           restoDoc = supp;
           canonicalSupplierId = supp._id.toString();
           targetRestaurantId = canonicalSupplierId;
-          resolvedRestoName = resolvedRestoName || supp.name || supp.restaurantName || 'Restaurant Partner';
+          resolvedRestoName = supp.name || supp.restaurantName || 'Restaurant Partner';
           const suppCat = supp.categoryName || supp.businessCategoryName || supp.partnerType || supp.businessType;
           if (suppCat) {
             resolvedCategory = suppCat;
@@ -593,7 +672,7 @@ exports.createBooking = async (req, res) => {
 
     const booking = new Booking({
       bookingId: newBookingId,
-      customerId: customerId,
+      customerId: resolvedCustomerId,
       customerName: resolvedCustomerName,
       customerPhone: resolvedCustomerPhone,
       customerPhoto: resolvedCustomerPhoto,
@@ -637,6 +716,14 @@ exports.createBooking = async (req, res) => {
       customerAddress: finalDestAddr,
       customerLatitude: Number(finalDestLat),
       customerLongitude: Number(finalDestLon),
+      // Order For Someone Else (Part F Requirement 14)
+      isOrderingForSomeoneElse: Boolean(req.body.isOrderingForSomeoneElse),
+      recipientRelationship: req.body.recipientRelationship || 'Self',
+      recipientName: req.body.recipientName || '',
+      recipientPhone: req.body.recipientPhone || '',
+      recipientAddress: req.body.recipientAddress || '',
+      recipientLatitude: req.body.recipientLatitude !== undefined && req.body.recipientLatitude !== null ? Number(req.body.recipientLatitude) : null,
+      recipientLongitude: req.body.recipientLongitude !== undefined && req.body.recipientLongitude !== null ? Number(req.body.recipientLongitude) : null,
       dropLocation: {
         latitude: Number(finalDestLat),
         longitude: Number(finalDestLon),
@@ -685,9 +772,16 @@ createdAt: ${booking.createdAt}`);
       _io.to(`order_${booking.bookingId}`).emit('restaurant_ringing', rawBookingObj);
     }
 
-    // Schedule 20-second delayed dispatch to Supplier Partner
-    if (socketHandlerObj && typeof socketHandlerObj.scheduleSupplierOrderDispatch === 'function') {
-      socketHandlerObj.scheduleSupplierOrderDispatch(rawBookingObj, 20000);
+    // Immediate dispatch to Supplier Partner
+    if (socketHandlerObj) {
+      if (typeof socketHandlerObj.dispatchBookingToEligibleSuppliers === 'function') {
+        socketHandlerObj.dispatchBookingToEligibleSuppliers(_io, rawBookingObj).catch((e) => {
+          console.error('[BOOKING_CREATE] Immediate supplier dispatch error:', e.message);
+        });
+      }
+      if (typeof socketHandlerObj.scheduleSupplierOrderDispatch === 'function') {
+        socketHandlerObj.scheduleSupplierOrderDispatch(rawBookingObj, 0);
+      }
     }
 
     return res.status(201).json({
@@ -745,21 +839,10 @@ exports.getMyBookings = async (req, res) => {
       if (requestedRole === 'supplier') {
         if (['supplier', 'seller_partner', 'restaurant'].includes(authRole)) {
           targetSupplierId = authId;
-        } else if (authRole === 'customer') {
-          // Cross-account protection: A customer token cannot query supplier bookings unless a verified supplier ID is passed
-          if (userId && mongoose.Types.ObjectId.isValid(userId)) {
-            const suppDoc = await User.findById(userId).select('role partnerId').lean();
-            if (suppDoc && ['supplier', 'seller_partner', 'restaurant'].includes((suppDoc.role || '').toLowerCase())) {
-              targetSupplierId = String(suppDoc._id);
-            } else {
-              // Not a valid supplier -> Prevent customer orders from leaking into supplier panel!
-              console.warn(`[getMyBookings] Refusing to return customer orders under supplier query for customer: ${authId}`);
-              return res.status(200).json({ success: true, count: 0, bookings: [] });
-            }
-          } else {
-            return res.status(200).json({ success: true, count: 0, bookings: [] });
-          }
+        } else if (authRole === 'admin' && userId) {
+          targetSupplierId = userId;
         } else {
+          console.warn(`[getMyBookings] Unauthorized attempt to query supplier bookings by non-supplier: ${authId}`);
           return res.status(200).json({ success: true, count: 0, bookings: [] });
         }
       } else if (requestedRole === 'rider') {
@@ -792,7 +875,11 @@ exports.getMyBookings = async (req, res) => {
         }
       }
     } else {
-      // Unauthenticated request fallback with DB role verification
+      // Unauthenticated request fallback
+      if (requestedRole === 'supplier') {
+        console.warn('[getMyBookings] Rejected unauthenticated request for supplier bookings');
+        return res.status(401).json({ success: false, message: 'Authentication required for supplier bookings' });
+      }
       const rawUserId = (userId || '').toString();
       if (!rawUserId) {
         return res.status(200).json({ success: true, count: 0, bookings: [] });
@@ -857,8 +944,10 @@ exports.getMyBookings = async (req, res) => {
         queryConditions.push({ 'dropLocation.customerId': cId });
       }
       const qPhone = targetPhone || req.query.phone;
-      if (qPhone) {
+      if (qPhone && !targetCustomerId) {
         queryConditions.push({ customerPhone: String(qPhone) });
+      } else if (qPhone && targetCustomerId) {
+        queryConditions.push({ customerPhone: String(qPhone), customerId: String(targetCustomerId) });
       }
     }
 
@@ -878,6 +967,20 @@ exports.getMyBookings = async (req, res) => {
     }
 
     const andClauses = [{ $or: uniqueConditions }];
+
+    // Strict Cross-Role Isolation:
+    if (requestedRole === 'supplier' && targetSupplierId) {
+      // Store view must NEVER show orders placed by this user as a customer
+      andClauses.push({ customerId: { $ne: String(targetSupplierId) } });
+    } else if (requestedRole === 'customer' && targetCustomerId) {
+      // Customer view must NEVER show orders incoming to a store/supplier
+      const cIdStr = String(targetCustomerId);
+      andClauses.push({
+        restaurantId: { $ne: cIdStr },
+        supplierId: { $ne: cIdStr },
+        providerId: { $ne: cIdStr },
+      });
+    }
 
     // Date filtering (YYYY-MM-DD)
     if (date && typeof date === 'string' && date.toUpperCase() !== 'ALL' && date !== 'null' && date !== 'undefined') {
@@ -992,6 +1095,7 @@ exports.getActiveBooking = async (req, res) => {
     const isRider = ['rider', 'delivery_partner', 'delivery'].includes(normRole) || Boolean(riderId);
 
     let activeConditions = [];
+    let roleExclusion = {};
     if (isSupplier) {
       activeConditions = [
         { providerId: { $in: idList } },
@@ -999,6 +1103,7 @@ exports.getActiveBooking = async (req, res) => {
         { supplierId: { $in: idList } },
         { partnerId: { $in: idList } },
       ];
+      roleExclusion = { customerId: { $nin: idList } };
     } else if (isRider) {
       activeConditions = [
         { riderId: { $in: idList } },
@@ -1007,15 +1112,24 @@ exports.getActiveBooking = async (req, res) => {
     } else {
       activeConditions = [
         { customerId: { $in: idList } },
-        { customerPhone: targetUserId },
       ];
+      if (req.query.phone || (typeof targetUserId === 'string' && /^\d{10}$/.test(targetUserId))) {
+        activeConditions.push({ customerPhone: req.query.phone || targetUserId });
+      }
+      roleExclusion = {
+        restaurantId: { $nin: idList },
+        supplierId: { $nin: idList },
+      };
     }
 
     // Only look for active bookings created within last 24 hours and strictly in activeStatuses
     const query = {
-      $or: activeConditions,
-      status: { $in: activeStatuses },
-      createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }
+      $and: [
+        { $or: activeConditions },
+        roleExclusion,
+        { status: { $in: activeStatuses } },
+        { createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } }
+      ]
     };
 
     const activeBooking = await Booking.findOne(query).sort({ createdAt: -1 });
@@ -1285,6 +1399,9 @@ exports.updateBookingStatus = async (req, res) => {
         booking.serviceName === 'Food Delivery' ||
         booking.categoryName === 'Food Delivery' ||
         Boolean(booking.restaurantId) ||
+        Boolean(booking.supplierId) ||
+        Boolean(booking.supplierBusinessName) ||
+        (Array.isArray(booking.items) && booking.items.length > 0) ||
         (booking.cartItems && typeof booking.cartItems === 'object' && Object.keys(booking.cartItems).length > 0)
       );
 
@@ -1404,13 +1521,32 @@ exports.updateBookingStatus = async (req, res) => {
           }
         }
       } else if (isFoodOrder && (status === 'PROVIDER_ARRIVED' || status === 'REACHED_RESTAURANT')) {
+        // 300-Meter Validation: Check rider distance from store pickup location
+        const riderLat = Number(rawBody.riderLatitude || rawBody.latitude || rawBody.lat || 0);
+        const riderLon = Number(rawBody.riderLongitude || rawBody.longitude || rawBody.lon || 0);
+        const storeLat = Number(booking.pickupLatitude || booking.restaurantLatitude || 0);
+        const storeLon = Number(booking.pickupLongitude || booking.restaurantLongitude || 0);
+
+        if (riderLat && riderLon && storeLat && storeLon) {
+          const distKm = _haversineDist(riderLat, riderLon, storeLat, storeLon);
+          if (distKm > 0.35) {
+            console.log(`⚠️ [300M VALIDATION BLOCKED] Rider is ${Math.round(distKm * 1000)}m away from store. Max allowed: 300m.`);
+            return res.status(400).json({
+              success: false,
+              error: 'DISTANCE_EXCEEDED',
+              message: `आप स्टोर से ${Math.round(distKm * 1000)}m दूर हैं। Reached मार्क करने के लिए स्टोर के 300 मीटर के दायरे में होना अनिवार्य है।`,
+              currentDistanceMeters: Math.round(distKm * 1000),
+              maxAllowedMeters: 300,
+            });
+          }
+        }
+
         // STRICT STATUS SEPARATION: Rider reaching restaurant MUST NEVER change order status!
-        // Order status remains PREPARING (or current state). Only riderStatus changes to REACHED_RESTAURANT.
         booking.riderStatus = 'REACHED_RESTAURANT';
         booking.riderReachedAt = new Date();
         booking.deliveryStatus = 'RIDER_AT_RESTAURANT';
         console.log(`ORDER #${booking.bookingId} | ACTOR: RIDER | EVENT: REACHED_RESTAURANT | RIDER_STATUS: REACHED_RESTAURANT | ORDER_STATUS: ${booking.status}`);
-      } else if (status === 'SERVICE_STARTED' || status === 'STARTED' || status === 'OUT_FOR_DELIVERY' || status === 'FOOD_PICKED_UP') {
+      } else if (status === 'SERVICE_STARTED' || status === 'STARTED' || status === 'OUT_FOR_DELIVERY' || status === 'FOOD_PICKED_UP' || status === 'PICKED_UP') {
         booking.status = isFoodOrder ? 'OUT_FOR_DELIVERY' : 'SERVICE_STARTED';
         booking.startedAt = new Date();
         if (isFoodOrder) {
@@ -1419,6 +1555,39 @@ exports.updateBookingStatus = async (req, res) => {
           booking.pickedUpAt = new Date();
         }
       } else if (status === 'SERVICE_COMPLETED' || status === 'COMPLETED' || status === 'DELIVERED') {
+        // Lifecycle Guard: An order cannot jump directly to DELIVERED without being OUT_FOR_DELIVERY / PICKED_UP
+        const currentSt = String(booking.status || '').toUpperCase();
+        const currentRiderSt = String(booking.riderStatus || '').toUpperCase();
+        const validPickups = ['OUT_FOR_DELIVERY', 'FOOD_PICKED_UP', 'PICKED_UP', 'REACHED_CUSTOMER', 'ARRIVED_AT_DROP'];
+        if (!validPickups.includes(currentSt) && !validPickups.includes(currentRiderSt)) {
+          console.log(`⚠️ [LIFECYCLE GUARD BLOCKED] Cannot jump from ${currentSt} directly to DELIVERED.`);
+          return res.status(400).json({
+            success: false,
+            error: 'INVALID_STATUS_TRANSITION',
+            message: 'ऑर्डर पहले स्टोर से पिकअप (Out for Delivery) होना चाहिए।',
+          });
+        }
+
+        // 300-Meter Validation: Check rider distance from customer drop location
+        const riderLat = Number(rawBody.riderLatitude || rawBody.latitude || rawBody.lat || 0);
+        const riderLon = Number(rawBody.riderLongitude || rawBody.longitude || rawBody.lon || 0);
+        const dropLat = Number(booking.dropLatitude || booking.customerLatitude || booking.latitude || 0);
+        const dropLon = Number(booking.dropLongitude || booking.customerLongitude || booking.longitude || 0);
+
+        if (riderLat && riderLon && dropLat && dropLon) {
+          const dropDistKm = _haversineDist(riderLat, riderLon, dropLat, dropLon);
+          if (dropDistKm > 0.35) {
+            console.log(`⚠️ [300M DROP VALIDATION BLOCKED] Rider is ${Math.round(dropDistKm * 1000)}m away from customer. Max allowed: 300m.`);
+            return res.status(400).json({
+              success: false,
+              error: 'DISTANCE_EXCEEDED',
+              message: `आप कस्टमर लोकेशन से ${Math.round(dropDistKm * 1000)}m दूर हैं। डिलीवरी केवल 300 मीटर के भीतर पूर्ण हो सकती है।`,
+              currentDistanceMeters: Math.round(dropDistKm * 1000),
+              maxAllowedMeters: 300,
+            });
+          }
+        }
+
         booking.status = 'COMPLETED';
         booking.completedAt = new Date();
         if (isFoodOrder) {
@@ -1450,9 +1619,17 @@ exports.updateBookingStatus = async (req, res) => {
       if (status === 'COMPLETED' || status === 'SERVICE_COMPLETED' || status === 'DELIVERED') {
         booking.deliveryStatus = 'DELIVERED';
         booking.riderStatus = 'DELIVERED';
-      } else if (status === 'STARTED' || status === 'SERVICE_STARTED' || status === 'OUT_FOR_DELIVERY') {
+      } else if (status === 'OUT_FOR_DELIVERY' || status === 'PICKED_UP' || status === 'FOOD_PICKED_UP') {
         booking.deliveryStatus = 'OUT_FOR_DELIVERY';
         booking.riderStatus = 'OUT_FOR_DELIVERY';
+      } else if (status === 'STARTED' || status === 'SERVICE_STARTED') {
+        if (!isFoodOrder) {
+          booking.deliveryStatus = 'OUT_FOR_DELIVERY';
+          booking.riderStatus = 'OUT_FOR_DELIVERY';
+        } else {
+          booking.deliveryStatus = 'RIDER_ASSIGNED';
+          booking.riderStatus = 'ON_THE_WAY_TO_PICKUP';
+        }
       } else if (status === 'REACHED_CUSTOMER' || status === 'ARRIVED_AT_DROP') {
         booking.deliveryStatus = 'OUT_FOR_DELIVERY';
         booking.riderStatus = 'REACHED_CUSTOMER';
@@ -1852,7 +2029,18 @@ exports.rateBooking = async (req, res) => {
 // Provider/Rider Earnings Summary (Real Completed Services / Deliveries - Total Withdrawals)
 exports.getProviderEarnings = async (req, res) => {
   try {
-    const { providerId, date, month, year } = req.query;
+    let { providerId, date, month, year } = req.query;
+    const authUserId = req.user ? String(req.user._id || req.user.id) : null;
+    const authUserRole = req.user?.role;
+
+    // Strict provider isolation: A provider/supplier cannot view another provider's earnings
+    if (req.user && authUserRole !== 'admin') {
+      if (providerId && String(providerId) !== authUserId) {
+        return res.status(403).json({ success: false, error: 'Unauthorized: Cannot view another provider\'s earnings' });
+      }
+      providerId = authUserId;
+    }
+
     if (!providerId) {
       return res.status(400).json({ success: false, error: 'providerId is required' });
     }
@@ -1930,7 +2118,10 @@ exports.getProviderEarnings = async (req, res) => {
             { restaurantId: { $in: idVariants } },
             { partnerId: { $in: idVariants } },
           ],
-      status: { $in: ['COMPLETED', 'SERVICE_COMPLETED', 'DELIVERED'] },
+      status: { $in: ['COMPLETED', 'SERVICE_COMPLETED', 'DELIVERED', 'Delivered', 'completed', 'delivered'] },
+      deliveryStatus: { $nin: ['CANCELLED', 'RESTAURANT_DECLINED', 'REJECTED', 'cancelled'] },
+      riderStatus: { $nin: ['CANCELLED', 'DECLINED', 'REJECTED', 'cancelled'] },
+      cancelledAt: { $exists: false },
     };
     // Merge date filter if present
     if (dateQuery.$or) {
@@ -1944,6 +2135,8 @@ exports.getProviderEarnings = async (req, res) => {
 
     // Fetch total requested & approved withdrawals for this provider
     const Withdrawal = require('../models/Withdrawal');
+    const Transaction = require('../models/Transaction');
+
     let withdrawals = [];
     try {
       withdrawals = await Withdrawal.find({
@@ -1952,9 +2145,37 @@ exports.getProviderEarnings = async (req, res) => {
       });
     } catch (e) {}
 
+    // Fetch total pocket deposits made by this provider
+    let totalDeposited = 0;
+    try {
+      const deposits = await Transaction.find({
+        userId: { $in: idVariants },
+        type: { $in: ['pocket_deposit', 'deposit', 'partner_deposit'] },
+        status: 'completed',
+      });
+      totalDeposited = deposits.reduce((sum, d) => sum + (d.amount || 0), 0);
+    } catch (e) {}
+
     const totalWithdrawn = withdrawals.reduce((sum, w) => sum + (w.withdrawAmount || 0), 0);
-    // Real Pocket Balance = Total Real Earnings - Total Withdrawn
-    const pocketBalance = Math.max(0, totalServiceEarnings - totalWithdrawn);
+    // Real Pocket Balance = Total Real Earnings + Total Deposited - Total Withdrawn
+    const pocketBalance = Math.max(0, totalServiceEarnings + totalDeposited - totalWithdrawn);
+
+    // Fetch provider user for cashLimit and cashInHand
+    let cashLimit = 1500;
+    let cashInHand = 0;
+    try {
+      const providerUser = await User.findOne({
+        $or: [
+          { _id: { $in: idVariants.filter(id => mongoose.Types.ObjectId.isValid(id)) } },
+          { partnerId: { $in: idVariants } },
+          { supplierId: { $in: idVariants } },
+        ]
+      });
+      if (providerUser) {
+        if (providerUser.cashLimit !== undefined) cashLimit = providerUser.cashLimit;
+        if (providerUser.cashInHand !== undefined) cashInHand = providerUser.cashInHand;
+      }
+    } catch (e) {}
 
     // Filter today's earnings
     const todayStr = new Date().toISOString().split('T')[0];
@@ -1989,7 +2210,10 @@ exports.getProviderEarnings = async (req, res) => {
       totalServiceEarnings,
       totalEarnings,
       totalWithdrawn,
+      totalDeposited,
       pocketBalance,
+      cashLimit,
+      cashInHand,
       completedServicesCount: completedBookings.length,
       averageEarning: completedBookings.length ? Math.round(totalServiceEarnings / completedBookings.length) : 0,
       earningsList,
@@ -2047,7 +2271,10 @@ exports.requestProviderWithdrawal = async (req, res) => {
             { restaurantId: { $in: idVariants } },
             { partnerId: { $in: idVariants } },
           ],
-      status: { $in: ['COMPLETED', 'SERVICE_COMPLETED', 'DELIVERED'] },
+      status: { $in: ['COMPLETED', 'SERVICE_COMPLETED', 'DELIVERED', 'Delivered', 'completed', 'delivered'] },
+      deliveryStatus: { $nin: ['CANCELLED', 'RESTAURANT_DECLINED', 'REJECTED', 'cancelled'] },
+      riderStatus: { $nin: ['CANCELLED', 'DECLINED', 'REJECTED', 'cancelled'] },
+      cancelledAt: { $exists: false },
     });
     const totalServiceEarnings = completedBookings.reduce((sum, b) => sum + (isRider ? getOrderRiderEarning(b) : getOrderRestaurantEarning(b)), 0);
 
@@ -3769,6 +3996,145 @@ exports.getRiderNearbyHotspots = async (req, res) => {
   } catch (error) {
     console.error('Error fetching rider nearby hotspots:', error);
     return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+// ── Part F Requirement 15: Safe Address Changes After Order Confirmation ──
+exports.requestAddressChange = async (req, res) => {
+  try {
+    const bookingId = req.params.bookingId || req.body.bookingId || req.body.rideId;
+    const { newAddress, newLatitude, newLongitude, reason } = req.body;
+
+    if (!bookingId) {
+      return res.status(400).json({ success: false, error: 'bookingId is required' });
+    }
+    if (!newAddress || newLatitude === undefined || newLongitude === undefined) {
+      return res.status(400).json({ success: false, error: 'newAddress, newLatitude, and newLongitude are required' });
+    }
+
+    let booking = await Booking.findOne({ bookingId });
+    if (!booking && mongoose.Types.ObjectId.isValid(bookingId)) {
+      booking = await Booking.findById(bookingId);
+    }
+    if (!booking) {
+      return res.status(404).json({ success: false, error: 'Order not found' });
+    }
+
+    const st = (booking.status || '').toUpperCase();
+    const finalStatuses = ['COMPLETED', 'DELIVERED', 'CANCELLED', 'RESTAURANT_DECLINED', 'TIMEOUT'];
+    if (finalStatuses.includes(st)) {
+      return res.status(400).json({
+        success: false,
+        error: `Cannot update delivery address. Order is already ${st.toLowerCase()}.`,
+      });
+    }
+
+    // Check Order Stage
+    const isOutForDelivery = st === 'OUT_FOR_DELIVERY' || booking.deliveryStatus === 'OUT_FOR_DELIVERY';
+
+    // Recalculate distance from store pickup location
+    const pickupLat = Number(booking.pickupLatitude || booking.supplierBusinessLatitude || 0);
+    const pickupLon = Number(booking.pickupLongitude || booking.supplierBusinessLongitude || 0);
+    let newDistKm = booking.distanceKm || 1;
+    let feeDifference = 0;
+
+    if (pickupLat && pickupLon && newLatitude && newLongitude) {
+      const R = 6371;
+      const dLat = ((Number(newLatitude) - pickupLat) * Math.PI) / 180;
+      const dLon = ((Number(newLongitude) - pickupLon) * Math.PI) / 180;
+      const a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos((pickupLat * Math.PI) / 180) *
+          Math.cos((Number(newLatitude) * Math.PI) / 180) *
+          Math.sin(dLon / 2) *
+          Math.sin(dLon / 2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      newDistKm = parseFloat((R * c).toFixed(1));
+
+      // Calculate authoritative delivery fee
+      const newDeliveryFee = newDistKm <= 2 ? 20 : 20 + Math.ceil(newDistKm - 2) * 10;
+      feeDifference = newDeliveryFee - (booking.deliveryFee || 20);
+    }
+
+    // Guard: If rider is already out for delivery and fee difference is large (> ₹30), require support intervention
+    if (isOutForDelivery && Math.abs(feeDifference) > 30) {
+      return res.status(400).json({
+        success: false,
+        error: 'Order is already out for delivery and address change exceeds allowable range. Please contact support.',
+      });
+    }
+
+    // Record in audit history
+    if (!booking.addressChangeHistory) booking.addressChangeHistory = [];
+    booking.addressChangeHistory.push({
+      oldAddress: booking.destinationAddress || booking.serviceAddress,
+      newAddress,
+      oldLatitude: booking.destinationLatitude,
+      oldLongitude: booking.destinationLongitude,
+      newLatitude: Number(newLatitude),
+      newLongitude: Number(newLongitude),
+      feeDifference,
+      reason: reason || 'Customer requested address update',
+      changedBy: req.user?.role?.toUpperCase() || 'CUSTOMER',
+      timestamp: new Date(),
+    });
+
+    // Update canonical destination & customer address
+    booking.destinationAddress = newAddress;
+    booking.destinationLatitude = Number(newLatitude);
+    booking.destinationLongitude = Number(newLongitude);
+    booking.serviceAddress = newAddress;
+    booking.customerAddress = newAddress;
+    booking.customerLatitude = Number(newLatitude);
+    booking.customerLongitude = Number(newLongitude);
+    booking.dropLocation = {
+      address: newAddress,
+      latitude: Number(newLatitude),
+      longitude: Number(newLongitude),
+      customerId: booking.customerId ? String(booking.customerId) : null,
+    };
+    booking.distanceKm = newDistKm;
+    if (feeDifference !== 0) {
+      booking.deliveryFee = (booking.deliveryFee || 20) + feeDifference;
+      booking.price = (booking.price || 0) + feeDifference;
+    }
+
+    await booking.save();
+
+    // Broadcast socket update to Customer, Supplier, and Rider
+    const _io = req.app.get('io') || global.io;
+    if (_io) {
+      const payload = {
+        bookingId: booking.bookingId,
+        newAddress,
+        newLatitude: Number(newLatitude),
+        newLongitude: Number(newLongitude),
+        feeDifference,
+        distanceKm: newDistKm,
+        updatedAt: new Date(),
+      };
+      _io.to(`booking_${booking.bookingId}`).emit('address_updated', payload);
+      _io.to(`order_${booking.bookingId}`).emit('address_updated', payload);
+      if (booking.customerId) {
+        _io.to(`customer_${booking.customerId}`).emit('address_updated', payload);
+      }
+      if (booking.restaurantId) {
+        _io.to(`restaurant_${booking.restaurantId}`).emit('address_updated', payload);
+      }
+      if (booking.riderId) {
+        _io.to(`rider_${booking.riderId}`).emit('address_updated', payload);
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Delivery address updated successfully and confirmed on backend.',
+      booking,
+      feeDifference,
+    });
+  } catch (err) {
+    console.error('Error updating address:', err);
+    return res.status(500).json({ success: false, error: err.message });
   }
 };
 

@@ -363,21 +363,24 @@ router.post('/select-zone', async (req, res) => {
 router.post(['/check-customer-serviceable', '/check-serviceable'], async (req, res) => {
   try {
     const { latitude, longitude } = req.body;
-    if (latitude === undefined || longitude === undefined || latitude === null || longitude === null) {
-      return res.status(400).json({
-        success: false,
-        serviceable: false,
-        message: 'Customer GPS coordinates required.',
+    if (latitude === undefined || longitude === undefined || latitude === null || longitude === null || (Number(latitude) === 0 && Number(longitude) === 0)) {
+      // Location still acquiring or not provided: DO NOT falsely flag as out-of-zone!
+      return res.status(200).json({
+        success: true,
+        serviceable: true,
+        pendingLocation: true,
+        message: 'Detecting GPS location...',
       });
     }
 
     const lat = Number(latitude);
     const lon = Number(longitude);
-    if (isNaN(lat) || isNaN(lon)) {
-      return res.status(400).json({
-        success: false,
-        serviceable: false,
-        message: 'Invalid latitude or longitude.',
+    if (isNaN(lat) || isNaN(lon) || !isFinite(lat) || !isFinite(lon)) {
+      return res.status(200).json({
+        success: true,
+        serviceable: true,
+        pendingLocation: true,
+        message: 'Acquiring valid GPS coordinates...',
       });
     }
 
@@ -389,21 +392,30 @@ router.post(['/check-customer-serviceable', '/check-serviceable'], async (req, r
 
     const userPoint = [lat, lon];
     let matchedZone = null;
+    let minDistanceFound = Infinity;
 
     for (const zone of zones) {
       if (isPointInZone(userPoint, zone)) {
         matchedZone = zone;
+        minDistanceFound = 0;
         break;
       }
       const dist = minDistanceToZone(userPoint, zone);
-      if (dist <= 35.0) { // Support extended Bhopal metropolitan area
+      if (dist < minDistanceFound) minDistanceFound = dist;
+      if (dist <= 40.0) { // Support extended Bhopal metropolitan area (up to 40 km)
         matchedZone = zone;
         break;
       }
     }
 
-    if (!matchedZone && zones.length > 0) {
-      matchedZone = zones[0]; // Graceful fallback to default Bhopal zone
+    // Only flag out of zone if verified coordinates are truly > 40 km from all zones
+    if (!matchedZone) {
+      return res.status(200).json({
+        success: true,
+        serviceable: false,
+        distanceKm: Number(minDistanceFound.toFixed(2)),
+        message: 'Aapki current GPS location hamari active delivery service boundary ke bahar hai.',
+      });
     }
 
     return res.status(200).json({
@@ -419,7 +431,8 @@ router.post(['/check-customer-serviceable', '/check-serviceable'], async (req, r
     });
   } catch (err) {
     console.error('Error in check-customer-serviceable:', err);
-    return res.status(500).json({ success: false, serviceable: false, message: err.message });
+    // Graceful fallback to serviceable true to prevent locking customer out on network glitch
+    return res.status(200).json({ success: true, serviceable: true, message: 'Service available.' });
   }
 });
 
