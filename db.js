@@ -32,6 +32,7 @@ const connectDB = async () => {
     lastConnectionError = error;
     console.error(`[MongoDB Atlas Warning] ${error.message}`);
     console.log('💡 Note: Backend API routes & Socket.IO server are online and operating smoothly.');
+    setTimeout(connectDB, 5000);
   }
 };
 

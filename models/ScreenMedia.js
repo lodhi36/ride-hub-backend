@@ -21,7 +21,7 @@ const screenMediaSchema = new mongoose.Schema(
         'PRODUCT_PROMOTION',
         'RIDER_HOME',
         'SUPPLIER_HOME',
-        'LIVE_TRACKING', // Restricted: Always disabled/blocked
+        'LIVE_TRACKING',
       ],
     },
     screenName: {

@@ -59,14 +59,23 @@ const targetToScreenId = (target) => {
 // Auto-sync ScreenMedia images into Banner collection so all images appear in Admin
 const syncScreenMediaToBanners = async () => {
   try {
-    const screensWithImages = await ScreenMedia.find({
-      $or: [
-        { imageUrl: { $exists: true, $ne: '' } },
-        { mediaUrl: { $exists: true, $ne: '' } }
-      ]
-    }).lean();
+    const screens = await ScreenMedia.find({}).lean();
 
-    for (const scr of screensWithImages) {
+    for (const scr of screens) {
+      const target = screenIdToTarget(scr.screenId);
+      if (!target) continue;
+
+      // If screen has no image or currentMediaType is explicitly NONE / inactive
+      if (
+        scr.currentMediaType === 'NONE' ||
+        scr.isActive === false ||
+        (!scr.imageUrl && !scr.mediaUrl)
+      ) {
+        // Ensure no orphaned active banners exist in Banner collection for this screen target
+        await Banner.deleteMany({ target: { $regex: new RegExp(`^${target}$`, 'i') } });
+        continue;
+      }
+
       const img = scr.imageUrl || scr.mediaUrl;
       if (!img || img.endsWith('.json') || img.endsWith('.lottie')) continue;
 
@@ -75,8 +84,6 @@ const syncScreenMediaToBanners = async () => {
       const existsOnDisk = fs.existsSync(path.join(uploadDir, fn));
       if (!img.startsWith('http') && !existsOnDisk) continue;
 
-      const target = screenIdToTarget(scr.screenId);
-      
       const existing = await Banner.findOne({
         $or: [
           { imageUrl: img },
@@ -138,10 +145,10 @@ exports.uploadBanner = async (req, res) => {
       ? ['RIDER', 'Rider']
       : [target];
 
-    // Check max 5 banners per target
+    // Check max 15 banners per target
     const count = await Banner.countDocuments({ target: { $in: targetMatches } });
-    if (count >= 5) {
-      return res.status(400).json({ success: false, message: `Maximum 5 banners allowed for ${target}` });
+    if (count >= 15) {
+      return res.status(400).json({ success: false, message: `Maximum 15 banners allowed for ${target}` });
     }
 
     // Ensure uploads folder exists
@@ -202,10 +209,15 @@ exports.uploadBanner = async (req, res) => {
   }
 };
 
+let isInitialMediaSynced = false;
+
 exports.getBanners = async (req, res) => {
   try {
-    // Auto-sync ScreenMedia images before returning
-    await syncScreenMediaToBanners();
+    // Auto-sync ScreenMedia images once on initial request in background
+    if (!isInitialMediaSynced) {
+      isInitialMediaSynced = true;
+      syncScreenMediaToBanners().catch(() => {});
+    }
 
     const query = {};
     if (req.query.target && req.query.target.toUpperCase() !== 'ALL') {

@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const https = require('https');
 const Booking = require('../models/Booking');
 const User = require('../models/User');
 const Zone = require('../models/Zone');
@@ -68,6 +69,101 @@ async function _getActiveZonesCached() {
     throw err;
   }
   return _cachedActiveZones;
+}
+
+function _isPointInZoneObject(point, zone) {
+  if (!zone) return false;
+  if (_isPointInPolygon(point, zone.polygonCoordinates)) return true;
+  if (Array.isArray(zone.configuredAreas)) {
+    for (const area of zone.configuredAreas) {
+      if (area.polygonCoordinates && _isPointInPolygon(point, area.polygonCoordinates)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function calculateRoadDistance(startLat, startLon, endLat, endLon) {
+  return new Promise((resolve) => {
+    const sLat = Number(startLat);
+    const sLon = Number(startLon);
+    const eLat = Number(endLat);
+    const eLon = Number(endLon);
+    if (!sLat || !sLon || !eLat || !eLon || isNaN(sLat) || isNaN(sLon) || isNaN(eLat) || isNaN(eLon)) {
+      return resolve(0);
+    }
+    const osrmUrl = `https://router.project-osrm.org/route/v1/driving/${sLon},${sLat};${eLon},${eLat}?overview=false`;
+    const opts = {
+      headers: {
+        'User-Agent': 'RideHub-Backend/2.0 (ridehubapp@gmail.com)'
+      },
+      timeout: 5000,
+    };
+
+    const req = https.get(osrmUrl, opts, (res) => {
+      let body = '';
+      res.on('data', chunk => body += chunk);
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(body);
+          if (parsed.code === 'Ok' && Array.isArray(parsed.routes) && parsed.routes[0]) {
+            const distMeters = parsed.routes[0].distance;
+            return resolve(Number((distMeters / 1000).toFixed(2)));
+          }
+        } catch (_) {}
+        fallbackOsmRouting(sLat, sLon, eLat, eLon).then(resolve);
+      });
+    });
+
+    req.on('error', () => {
+      fallbackOsmRouting(sLat, sLon, eLat, eLon).then(resolve);
+    });
+
+    req.on('timeout', () => {
+      req.destroy();
+      fallbackOsmRouting(sLat, sLon, eLat, eLon).then(resolve);
+    });
+  });
+}
+
+function fallbackOsmRouting(startLat, startLon, endLat, endLon) {
+  return new Promise((resolve) => {
+    const osmUrl = `https://routing.openstreetmap.de/routed-car/route/v1/driving/${startLon},${startLat};${endLon},${endLat}?overview=false`;
+    const opts = {
+      headers: {
+        'User-Agent': 'RideHub-Backend/2.0 (ridehubapp@gmail.com)'
+      },
+      timeout: 5000,
+    };
+
+    const req = https.get(osmUrl, opts, (res) => {
+      let body = '';
+      res.on('data', chunk => body += chunk);
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(body);
+          if (parsed.code === 'Ok' && Array.isArray(parsed.routes) && parsed.routes[0]) {
+            const distMeters = parsed.routes[0].distance;
+            return resolve(Number((distMeters / 1000).toFixed(2)));
+          }
+        } catch (_) {}
+        const hav = _haversineDist(startLat, startLon, endLat, endLon);
+        resolve(Number((hav * 1.35).toFixed(2)));
+      });
+    });
+
+    req.on('error', () => {
+      const hav = _haversineDist(startLat, startLon, endLat, endLon);
+      resolve(Number((hav * 1.35).toFixed(2)));
+    });
+
+    req.on('timeout', () => {
+      req.destroy();
+      const hav = _haversineDist(startLat, startLon, endLat, endLon);
+      resolve(Number((hav * 1.35).toFixed(2)));
+    });
+  });
 }
 
 let _io = null;
@@ -348,7 +444,10 @@ exports.createBooking = async (req, res) => {
     if (!resolvedCustomerId) {
       return res.status(400).json({ success: false, error: 'customerId is required' });
     }
-    if (latitude === undefined || latitude === null || longitude === undefined || longitude === null) {
+    const resolvedLat = latitude !== undefined && latitude !== null ? latitude : (req.body.recipientLatitude !== undefined && req.body.recipientLatitude !== null ? req.body.recipientLatitude : (destinationLatitude !== undefined ? destinationLatitude : req.body.customerLatitude));
+    const resolvedLon = longitude !== undefined && longitude !== null ? longitude : (req.body.recipientLongitude !== undefined && req.body.recipientLongitude !== null ? req.body.recipientLongitude : (destinationLongitude !== undefined ? destinationLongitude : req.body.customerLongitude));
+
+    if (resolvedLat === undefined || resolvedLat === null || resolvedLon === undefined || resolvedLon === null) {
       return res.status(400).json({ success: false, error: 'latitude and longitude are required' });
     }
     const newBookingId = bookingId || `book_${Date.now()}`;
@@ -380,41 +479,90 @@ exports.createBooking = async (req, res) => {
     }
 
     
-    // MANDATORY REQUIREMENT: Backend service-zone validation for Customer GPS (Cached for fast order placement)
-    const checkLat = Number(destinationLatitude !== undefined && destinationLatitude !== null ? destinationLatitude : latitude);
-    const checkLon = Number(destinationLongitude !== undefined && destinationLongitude !== null ? destinationLongitude : longitude);
+    // MANDATORY REQUIREMENT: Backend service-zone validation for Customer GPS & Friend Delivery
+    const isFriendOrder = Boolean(
+      req.body.orderType === 'SOMEONE_ELSE' ||
+      req.body.isOrderingForSomeoneElse ||
+      (req.body.recipientRelationship && req.body.recipientRelationship !== 'Self')
+    );
 
-    if (!isNaN(checkLat) && !isNaN(checkLon) && checkLat !== 0 && checkLon !== 0) {
-      try {
-        let activeZones = await _getActiveZonesCached();
-        if (activeZones && activeZones.length > 0) {
-          const userPoint = [checkLat, checkLon];
-          let isCustomerServiceable = false;
+    let friendZoneObj = null;
+    let friendLat = 0;
+    let friendLon = 0;
 
-          for (const zone of activeZones) {
-            if (_isPointInPolygon(userPoint, zone.polygonCoordinates)) {
-              isCustomerServiceable = true;
-              break;
-            }
-            const dist = _minDistanceToPolygon(userPoint, zone.polygonCoordinates, zone.centerCoordinates);
-            // Strict Zone Boundary Rule: Must be inside polygon boundary (max 200m buffer for GPS jitter)
-            if (dist <= 0.2) {
-              isCustomerServiceable = true;
-              break;
-            }
-          }
+    if (isFriendOrder) {
+      friendLat = Number(req.body.recipientLatitude !== undefined && req.body.recipientLatitude !== null ? req.body.recipientLatitude : (destinationLatitude !== undefined ? destinationLatitude : latitude));
+      friendLon = Number(req.body.recipientLongitude !== undefined && req.body.recipientLongitude !== null ? req.body.recipientLongitude : (destinationLongitude !== undefined ? destinationLongitude : longitude));
 
-          if (!isCustomerServiceable) {
-            console.log(`🚫 [OUT-OF-ZONE REJECTED] Order blocked. Customer GPS (${checkLat}, ${checkLon}) is outside all active service boundaries.`);
-            return res.status(400).json({
-              success: false,
-              error: 'This service is not available in your location.',
-              message: 'This service is not available in your location.'
-            });
-          }
+      if (isNaN(friendLat) || isNaN(friendLon) || friendLat === 0 || friendLon === 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'Valid friend delivery location coordinates are required.',
+          message: 'Valid friend delivery location coordinates are required.'
+        });
+      }
+
+      // FIRST VALIDATION – DELIVERY ZONE CHECK FOR FRIEND
+      let activeZones = await _getActiveZonesCached();
+      if (!activeZones || activeZones.length === 0) {
+        await Zone.seedDefaultZones();
+        activeZones = await _getActiveZonesCached();
+      }
+
+      const friendPoint = [friendLat, friendLon];
+      for (const zone of activeZones) {
+        if (_isPointInZoneObject(friendPoint, zone)) {
+          friendZoneObj = zone;
+          break;
         }
-      } catch (zoneErr) {
-        console.warn('⚠️ [ZONE CHECK WARNING]', zoneErr.message);
+      }
+
+      if (!friendZoneObj) {
+        console.log(`🚫 [FRIEND OUT-OF-ZONE REJECTED] Friend location (${friendLat}, ${friendLon}) is outside all active delivery zones.`);
+        return res.status(400).json({
+          success: false,
+          outOfZone: true,
+          error: "Sorry! This location is out of our delivery zone.",
+          message: "Sorry! This location is out of our delivery zone."
+        });
+      }
+    } else {
+      // Normal self delivery zone validation (Preserved 100%)
+      const checkLat = Number(destinationLatitude !== undefined && destinationLatitude !== null ? destinationLatitude : latitude);
+      const checkLon = Number(destinationLongitude !== undefined && destinationLongitude !== null ? destinationLongitude : longitude);
+
+      if (!isNaN(checkLat) && !isNaN(checkLon) && checkLat !== 0 && checkLon !== 0) {
+        try {
+          let activeZones = await _getActiveZonesCached();
+          if (activeZones && activeZones.length > 0) {
+            const userPoint = [checkLat, checkLon];
+            let isCustomerServiceable = false;
+
+            for (const zone of activeZones) {
+              if (_isPointInPolygon(userPoint, zone.polygonCoordinates)) {
+                isCustomerServiceable = true;
+                break;
+              }
+              const dist = _minDistanceToPolygon(userPoint, zone.polygonCoordinates, zone.centerCoordinates);
+              // Strict Zone Boundary Rule: Must be inside polygon boundary (max 200m buffer for GPS jitter)
+              if (dist <= 0.2) {
+                isCustomerServiceable = true;
+                break;
+              }
+            }
+
+            if (!isCustomerServiceable) {
+              console.log(`🚫 [OUT-OF-ZONE REJECTED] Order blocked. Customer GPS (${checkLat}, ${checkLon}) is outside all active service boundaries.`);
+              return res.status(400).json({
+                success: false,
+                error: 'This service is not available in your location.',
+                message: 'This service is not available in your location.'
+              });
+            }
+          }
+        } catch (zoneErr) {
+          console.warn('⚠️ [ZONE CHECK WARNING]', zoneErr.message);
+        }
       }
     }
 
@@ -616,13 +764,42 @@ exports.createBooking = async (req, res) => {
     let finalDestAddr = req.body.customerAddress || destinationAddress || resolvedAddress;
 
     let calculatedDistanceKm = Number(distanceKm || 0);
-    if ((!calculatedDistanceKm || calculatedDistanceKm === 0) && resolvedPickupLat && resolvedPickupLon && finalDestLat && finalDestLon) {
-      const R = 6371;
-      const dLatRad = ((finalDestLat - resolvedPickupLat) * Math.PI) / 180;
-      const dLonRad = ((finalDestLon - resolvedPickupLon) * Math.PI) / 180;
-      const a = Math.sin(dLatRad / 2) * Math.sin(dLatRad / 2) + Math.cos((resolvedPickupLat * Math.PI) / 180) * Math.cos((finalDestLat * Math.PI) / 180) * Math.sin(dLonRad / 2) * Math.sin(dLonRad / 2);
-      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-      calculatedDistanceKm = parseFloat((R * c).toFixed(1));
+    let friendRoadDistKm = 0;
+
+    // SECOND VALIDATION – SELECTED RESTAURANT'S 5 KM DELIVERY RADIUS FOR FRIEND
+    if (isFriendOrder) {
+      finalDestLat = friendLat;
+      finalDestLon = friendLon;
+      finalDestAddr = req.body.recipientAddress || finalDestAddr;
+
+      if (resolvedPickupLat && resolvedPickupLon && resolvedPickupLat !== 0 && resolvedPickupLon !== 0) {
+        friendRoadDistKm = await calculateRoadDistance(resolvedPickupLat, resolvedPickupLon, friendLat, friendLon);
+        console.log(`📏 [FRIEND ROAD DISTANCE] Restaurant (${resolvedPickupLat}, ${resolvedPickupLon}) to Friend (${friendLat}, ${friendLon}) = ${friendRoadDistKm} km`);
+        if (friendRoadDistKm > 5.0) {
+          console.log(`🚫 [FRIEND ORDER REJECTED - EXCEEDS 5KM] Distance ${friendRoadDistKm} km > 5.0 km limit.`);
+          return res.status(400).json({
+            success: false,
+            outside5KmRadius: true,
+            calculatedRoadDistance: friendRoadDistKm,
+            allowedDeliveryRadius: 5.0,
+            error: "Sorry! This restaurant cannot deliver to your friend's selected address because it is outside the 5 KM delivery range. Please select another restaurant or change the delivery address.",
+            message: "Sorry! This restaurant cannot deliver to your friend's selected address because it is outside the 5 KM delivery range. Please select another restaurant or change the delivery address."
+          });
+        }
+      } else {
+        friendRoadDistKm = 2.5; // Default safe local distance if resto coords not yet initialized
+      }
+      calculatedDistanceKm = friendRoadDistKm;
+    } else {
+      // Normal self distance calculation
+      if ((!calculatedDistanceKm || calculatedDistanceKm === 0) && resolvedPickupLat && resolvedPickupLon && finalDestLat && finalDestLon) {
+        const R = 6371;
+        const dLatRad = ((finalDestLat - resolvedPickupLat) * Math.PI) / 180;
+        const dLonRad = ((finalDestLon - resolvedPickupLon) * Math.PI) / 180;
+        const a = Math.sin(dLatRad / 2) * Math.sin(dLatRad / 2) + Math.cos((resolvedPickupLat * Math.PI) / 180) * Math.cos((finalDestLat * Math.PI) / 180) * Math.sin(dLonRad / 2) * Math.sin(dLonRad / 2);
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        calculatedDistanceKm = parseFloat((R * c).toFixed(1));
+      }
     }
 
     // Ride Hub Standard Pricing Rule (Authoritative backend enforcement):
@@ -716,14 +893,18 @@ exports.createBooking = async (req, res) => {
       customerAddress: finalDestAddr,
       customerLatitude: Number(finalDestLat),
       customerLongitude: Number(finalDestLon),
-      // Order For Someone Else (Part F Requirement 14)
-      isOrderingForSomeoneElse: Boolean(req.body.isOrderingForSomeoneElse),
-      recipientRelationship: req.body.recipientRelationship || 'Self',
-      recipientName: req.body.recipientName || '',
-      recipientPhone: req.body.recipientPhone || '',
-      recipientAddress: req.body.recipientAddress || '',
-      recipientLatitude: req.body.recipientLatitude !== undefined && req.body.recipientLatitude !== null ? Number(req.body.recipientLatitude) : null,
-      recipientLongitude: req.body.recipientLongitude !== undefined && req.body.recipientLongitude !== null ? Number(req.body.recipientLongitude) : null,
+      // Order For Someone Else (Part F Requirement 14 & Friend Delivery)
+      orderType: isFriendOrder ? 'SOMEONE_ELSE' : 'SELF',
+      isOrderingForSomeoneElse: isFriendOrder,
+      recipientRelationship: isFriendOrder ? (req.body.recipientRelationship || 'Friend') : 'Self',
+      recipientName: isFriendOrder ? (req.body.recipientName || 'Friend') : '',
+      recipientPhone: isFriendOrder ? (req.body.recipientPhone || '') : '',
+      recipientAddress: isFriendOrder ? (req.body.recipientAddress || finalDestAddr) : '',
+      recipientLatitude: isFriendOrder ? friendLat : null,
+      recipientLongitude: isFriendOrder ? friendLon : null,
+      recipientZoneId: isFriendOrder && friendZoneObj ? (friendZoneObj.zoneId || friendZoneObj._id.toString()) : null,
+      calculatedRoadDistance: isFriendOrder ? friendRoadDistKm : calculatedDistanceKm,
+      allowedDeliveryRadius: 5.0,
       dropLocation: {
         latitude: Number(finalDestLat),
         longitude: Number(finalDestLon),
@@ -4137,4 +4318,115 @@ exports.requestAddressChange = async (req, res) => {
     return res.status(500).json({ success: false, error: err.message });
   }
 };
+
+// ── RIDE HUB FRIEND DELIVERY VALIDATION (Zone Check & 5 KM Road Radius) ──
+exports.validateFriendDelivery = async (req, res) => {
+  try {
+    const {
+      friendLatitude,
+      friendLongitude,
+      restaurantId,
+      restaurantLatitude,
+      restaurantLongitude,
+    } = req.body;
+
+    const fLat = Number(friendLatitude);
+    const fLon = Number(friendLongitude);
+
+    if (isNaN(fLat) || isNaN(fLon) || fLat === 0 || fLon === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Valid friend GPS latitude and longitude are required.',
+      });
+    }
+
+    // 1. Delivery Zone Check
+    let activeZones = await _getActiveZonesCached();
+    if (!activeZones || activeZones.length === 0) {
+      await Zone.seedDefaultZones();
+      activeZones = await _getActiveZonesCached();
+    }
+
+    const friendPoint = [fLat, fLon];
+    let matchedZone = null;
+    for (const zone of activeZones) {
+      if (_isPointInZoneObject(friendPoint, zone)) {
+        matchedZone = zone;
+        break;
+      }
+    }
+
+    if (!matchedZone) {
+      return res.status(200).json({
+        success: false,
+        serviceable: false,
+        insideZone: false,
+        message: 'Sorry! This location is out of our delivery zone.',
+      });
+    }
+
+    // 2. 5 KM Restaurant Delivery Radius Check
+    let rLat = Number(restaurantLatitude || 0);
+    let rLon = Number(restaurantLongitude || 0);
+
+    if ((!rLat || !rLon) && restaurantId) {
+      try {
+        const restoUser = await User.findById(restaurantId).lean();
+        if (restoUser) {
+          rLat = Number(restoUser.businessLatitude || restoUser.latitude || 0);
+          rLon = Number(restoUser.businessLongitude || restoUser.longitude || 0);
+        }
+      } catch (_) {}
+    }
+
+    if (rLat > 0 && rLon > 0) {
+      const roadDistKm = await calculateRoadDistance(rLat, rLon, fLat, fLon);
+      if (roadDistKm > 5.0) {
+        return res.status(200).json({
+          success: false,
+          serviceable: false,
+          insideZone: true,
+          within5Km: false,
+          roadDistanceKm: roadDistKm,
+          allowedRadiusKm: 5.0,
+          zone: {
+            zoneId: matchedZone.zoneId,
+            zoneName: matchedZone.zoneName,
+          },
+          message: "Sorry! This restaurant cannot deliver to your friend's selected address because it is outside the 5 KM delivery range. Please select another restaurant or change the delivery address.",
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        serviceable: true,
+        insideZone: true,
+        within5Km: true,
+        roadDistanceKm: roadDistKm,
+        allowedRadiusKm: 5.0,
+        zone: {
+          zoneId: matchedZone.zoneId,
+          zoneName: matchedZone.zoneName,
+        },
+        message: 'Delivery address is within our service zone.',
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      serviceable: true,
+      insideZone: true,
+      within5Km: true,
+      zone: {
+        zoneId: matchedZone.zoneId,
+        zoneName: matchedZone.zoneName,
+      },
+      message: 'Delivery address is within our service zone.',
+    });
+  } catch (err) {
+    console.error('Error validating friend delivery:', err);
+    res.status(500).json({ success: false, message: 'Failed to validate friend delivery location', error: err.message });
+  }
+};
+
 

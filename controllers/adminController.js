@@ -101,86 +101,101 @@ exports.getDashboardStats = async (req, res) => {
   try {
     const SupportCase = require('../models/SupportCase');
 
-    // 1. User & Account Counts
-    const totalUsers = await User.countDocuments({ role: { $ne: 'admin' }, isAdmin: { $ne: true } });
-    const totalCustomers = await User.countDocuments({
-      $or: [{ role: { $in: ['customer', 'user'] } }, { role: { $exists: false } }, { role: null }],
-      isAdmin: { $ne: true }
-    });
-
-    const totalSuppliers = await User.countDocuments({ role: { $in: ['supplier', 'restaurant'] } });
-    const approvedSuppliers = await User.countDocuments({
-      role: { $in: ['supplier', 'restaurant'] },
-      $or: [{ isApproved: true }, { approved: true }, { verificationStatus: 'approved' }]
-    });
-    const unapprovedSuppliers = Math.max(0, totalSuppliers - approvedSuppliers);
-
-    const totalRiders = await User.countDocuments({ role: { $in: ['rider', 'delivery_partner'] } });
-    const approvedRiders = await User.countDocuments({
-      role: { $in: ['rider', 'delivery_partner'] },
-      $or: [{ isApproved: true }, { approved: true }, { verificationStatus: 'approved' }]
-    });
-    const unapprovedRiders = Math.max(0, totalRiders - approvedRiders);
-
-    const pendingVerifications = await User.countDocuments({
-      verificationStatus: 'pending',
-      role: { $ne: 'admin' },
-      isAdmin: { $ne: true }
-    });
-
-    // Active users: count users where isOnline is true
-    const activeUsers = await User.countDocuments({
-      role: { $ne: 'admin' },
-      isAdmin: { $ne: true },
-      isOnline: true
-    });
-
-    const premiumUsers = await User.countDocuments({ isPremium: true, role: { $ne: 'admin' }, isAdmin: { $ne: true } });
-    const reportedAccounts = await User.countDocuments({ blockedUsers: { $exists: true, $not: { $size: 0 } }, role: { $ne: 'admin' }, isAdmin: { $ne: true } });
-
-    // 2. Orders & Lifecycle Breakdown
-    const totalBookings = await Booking.countDocuments();
-    const pendingOrders = await Booking.countDocuments({
-      status: { $in: ['BOOKING_REQUESTED', 'ORDER_PLACED', 'PENDING', 'PENDING_RESTAURANT', 'SEARCHING_RIDER'] }
-    });
-    const acceptedOrders = await Booking.countDocuments({
-      status: { $in: ['ACCEPTED', 'RESTAURANT_ACCEPTED', 'PROVIDER_ACCEPTED'] }
-    });
-    const processingOrders = await Booking.countDocuments({
-      status: { $in: ['PREPARING', 'READY', 'READY_FOR_PICKUP', 'FOOD_READY'] }
-    });
-    const outForDeliveryOrders = await Booking.countDocuments({
-      status: { $in: ['OUT_FOR_DELIVERY', 'STARTED', 'SERVICE_STARTED'] }
-    });
-    const completedOrders = await Booking.countDocuments({
-      status: { $in: ['COMPLETED', 'DELIVERED', 'SERVICE_COMPLETED'] }
-    });
-    const cancelledOrders = await Booking.countDocuments({
-      status: { $regex: 'CANCEL', $options: 'i' }
-    });
-    const supplierCancellations = await Booking.countDocuments({
-      $or: [{ cancelledBy: 'supplier' }, { status: 'RESTAURANT_DECLINED' }]
-    });
-    const riderCancellations = await Booking.countDocuments({
-      cancelledBy: 'rider'
-    });
-    const customerCancellations = await Booking.countDocuments({
-      cancelledBy: 'customer'
-    });
-    const activeBookings = pendingOrders + acceptedOrders + processingOrders + outForDeliveryOrders;
-
-    // 3. Financial Metrics & Revenue
-    const completedBookingsAggr = await Booking.aggregate([
-      { $match: { status: { $in: ['COMPLETED', 'DELIVERED', 'SERVICE_COMPLETED'] } } },
-      {
-        $group: {
-          _id: null,
-          grossVolume: { $sum: { $ifNull: ["$foodTotal", { $ifNull: ["$totalAmount", { $ifNull: ["$price", 0] }] }] } },
-          totalDeliveryFees: { $sum: { $ifNull: ["$deliveryFee", 0] } },
-          totalPlatformFees: { $sum: { $ifNull: ["$platformFee", 5] } }
+    // 1. Concurrently run all database counts in parallel for ultra-fast response
+    const [
+      totalUsers,
+      totalCustomers,
+      totalSuppliers,
+      approvedSuppliers,
+      totalRiders,
+      approvedRiders,
+      pendingVerifications,
+      activeUsers,
+      premiumUsers,
+      reportedAccounts,
+      totalBookings,
+      pendingOrders,
+      acceptedOrders,
+      processingOrders,
+      outForDeliveryOrders,
+      completedOrders,
+      cancelledOrders,
+      supplierCancellations,
+      riderCancellations,
+      customerCancellations,
+      completedBookingsAggr,
+    ] = await Promise.all([
+      User.countDocuments({ role: { $ne: 'admin' }, isAdmin: { $ne: true } }),
+      User.countDocuments({
+        $or: [{ role: { $in: ['customer', 'user'] } }, { role: { $exists: false } }, { role: null }],
+        isAdmin: { $ne: true }
+      }),
+      User.countDocuments({ role: { $in: ['supplier', 'restaurant'] } }),
+      User.countDocuments({
+        role: { $in: ['supplier', 'restaurant'] },
+        $or: [{ isApproved: true }, { approved: true }, { verificationStatus: 'approved' }]
+      }),
+      User.countDocuments({ role: { $in: ['rider', 'delivery_partner'] } }),
+      User.countDocuments({
+        role: { $in: ['rider', 'delivery_partner'] },
+        $or: [{ isApproved: true }, { approved: true }, { verificationStatus: 'approved' }]
+      }),
+      User.countDocuments({
+        verificationStatus: 'pending',
+        role: { $ne: 'admin' },
+        isAdmin: { $ne: true }
+      }),
+      User.countDocuments({
+        role: { $ne: 'admin' },
+        isAdmin: { $ne: true },
+        isOnline: true
+      }),
+      User.countDocuments({ isPremium: true, role: { $ne: 'admin' }, isAdmin: { $ne: true } }),
+      User.countDocuments({ blockedUsers: { $exists: true, $not: { $size: 0 } }, role: { $ne: 'admin' }, isAdmin: { $ne: true } }),
+      Booking.countDocuments(),
+      Booking.countDocuments({
+        status: { $in: ['BOOKING_REQUESTED', 'ORDER_PLACED', 'PENDING', 'PENDING_RESTAURANT', 'SEARCHING_RIDER'] }
+      }),
+      Booking.countDocuments({
+        status: { $in: ['ACCEPTED', 'RESTAURANT_ACCEPTED', 'PROVIDER_ACCEPTED'] }
+      }),
+      Booking.countDocuments({
+        status: { $in: ['PREPARING', 'READY', 'READY_FOR_PICKUP', 'FOOD_READY'] }
+      }),
+      Booking.countDocuments({
+        status: { $in: ['OUT_FOR_DELIVERY', 'STARTED', 'SERVICE_STARTED'] }
+      }),
+      Booking.countDocuments({
+        status: { $in: ['COMPLETED', 'DELIVERED', 'SERVICE_COMPLETED'] }
+      }),
+      Booking.countDocuments({
+        status: { $regex: 'CANCEL', $options: 'i' }
+      }),
+      Booking.countDocuments({
+        $or: [{ cancelledBy: 'supplier' }, { status: 'RESTAURANT_DECLINED' }]
+      }),
+      Booking.countDocuments({
+        cancelledBy: 'rider'
+      }),
+      Booking.countDocuments({
+        cancelledBy: 'customer'
+      }),
+      Booking.aggregate([
+        { $match: { status: { $in: ['COMPLETED', 'DELIVERED', 'SERVICE_COMPLETED'] } } },
+        {
+          $group: {
+            _id: null,
+            grossVolume: { $sum: { $ifNull: ["$foodTotal", { $ifNull: ["$totalAmount", { $ifNull: ["$price", 0] }] }] } },
+            totalDeliveryFees: { $sum: { $ifNull: ["$deliveryFee", 0] } },
+            totalPlatformFees: { $sum: { $ifNull: ["$platformFee", 5] } }
+          }
         }
-      }
+      ]),
     ]);
+
+    const unapprovedSuppliers = Math.max(0, totalSuppliers - approvedSuppliers);
+    const unapprovedRiders = Math.max(0, totalRiders - approvedRiders);
+    const activeBookings = pendingOrders + acceptedOrders + processingOrders + outForDeliveryOrders;
     const grossOrderVolume = completedBookingsAggr.length > 0 ? (completedBookingsAggr[0].grossVolume || 0) : 0;
     const totalPlatformRevenue = completedBookingsAggr.length > 0 ? (completedBookingsAggr[0].totalPlatformFees || 0) : 0;
 

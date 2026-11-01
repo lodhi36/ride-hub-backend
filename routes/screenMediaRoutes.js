@@ -14,8 +14,42 @@ if (!fs.existsSync(uploadDir)) {
 // Memory storage for inspection and validation before writing to disk
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 15 * 1024 * 1024 }, // 15MB limit
+  limits: { fileSize: 30 * 1024 * 1024 }, // 30MB limit for rich animations
 });
+
+// Helper: Extract inner animation.json from a .lottie (zip) file
+const extractJsonFromDotLottie = (buffer) => {
+  let offset = 0;
+  const zlib = require('zlib');
+  while (offset < buffer.length - 30) {
+    if (buffer.readUInt32LE(offset) === 0x04034b50) {
+      const compressionMethod = buffer.readUInt16LE(offset + 8);
+      const compressedSize = buffer.readUInt32LE(offset + 18);
+      const fileNameLen = buffer.readUInt16LE(offset + 26);
+      const extraFieldLen = buffer.readUInt16LE(offset + 28);
+      const fileName = buffer.toString('utf8', offset + 30, offset + 30 + fileNameLen);
+      const fileDataOffset = offset + 30 + fileNameLen + extraFieldLen;
+      const fileData = buffer.subarray(fileDataOffset, fileDataOffset + compressedSize);
+
+      if (fileName.endsWith('.json') && !fileName.toLowerCase().includes('manifest')) {
+        let uncompressed = null;
+        if (compressionMethod === 0) {
+          uncompressed = fileData;
+        } else if (compressionMethod === 8) {
+          uncompressed = zlib.inflateRawSync(fileData);
+        }
+        if (uncompressed) {
+          const json = JSON.parse(uncompressed.toString('utf8'));
+          return json;
+        }
+      }
+      offset = fileDataOffset + compressedSize;
+    } else {
+      offset++;
+    }
+  }
+  return null;
+};
 
 // Default screens configuration
 const DEFAULT_SCREENS = [
@@ -112,8 +146,8 @@ const DEFAULT_SCREENS = [
   {
     screenId: 'CATEGORY_IMAGES',
     screenName: 'Category Images',
-    allowedMediaTypes: ['IMAGE'],
-    currentMediaType: 'IMAGE',
+    allowedMediaTypes: ['IMAGE', 'BANNER', 'LOTTIE'],
+    currentMediaType: 'BOTH',
     title: 'Master Category Catalog Media',
     description: 'Icons and artwork for all catalog services (Food, Fashion, Groceries, etc.)',
     isRestricted: false,
@@ -132,8 +166,8 @@ const DEFAULT_SCREENS = [
   {
     screenId: 'RIDER_HOME',
     screenName: 'Rider Home Screen',
-    allowedMediaTypes: ['IMAGE', 'BANNER'],
-    currentMediaType: 'BANNER',
+    allowedMediaTypes: ['IMAGE', 'BANNER', 'LOTTIE'],
+    currentMediaType: 'BOTH',
     title: 'Delivery Partner Dashboard Media',
     description: 'Incentive banners and announcement posters for delivery riders',
     isRestricted: false,
@@ -142,8 +176,8 @@ const DEFAULT_SCREENS = [
   {
     screenId: 'SUPPLIER_HOME',
     screenName: 'Supplier Home Screen',
-    allowedMediaTypes: ['IMAGE', 'BANNER'],
-    currentMediaType: 'BANNER',
+    allowedMediaTypes: ['IMAGE', 'BANNER', 'LOTTIE'],
+    currentMediaType: 'BOTH',
     title: 'Store & Merchant Portal Media',
     description: 'Promotional banners and merchant news for suppliers and restaurants',
     isRestricted: false,
@@ -162,34 +196,18 @@ const DEFAULT_SCREENS = [
   },
 ];
 
-// Helper: Ensure defaults are seeded
-const ensureScreensSeeded = async () => {
+// Helper: Ensure defaults are seeded (cached in memory for ultra-fast response)
+let isSeeded = false;
+const ensureScreensSeeded = async (force = false) => {
+  if (isSeeded && !force) return;
   try {
-    for (const s of DEFAULT_SCREENS) {
-      const exists = await ScreenMedia.findOne({ screenId: s.screenId });
-      if (!exists) {
-        await ScreenMedia.create(s);
-      } else if (s.screenId === 'LIVE_TRACKING') {
-        // Enforce restriction on LIVE_TRACKING always
-        exists.isRestricted = true;
-        exists.restrictionReason = s.restrictionReason;
-        exists.allowedMediaTypes = [];
-        exists.isActive = false;
-        await exists.save();
-      } else {
-        // Ensure new allowed types (IMAGE, LOTTIE) are enabled for existing records
-        let modified = false;
-        if (s.allowedMediaTypes && (!exists.allowedMediaTypes || exists.allowedMediaTypes.length < s.allowedMediaTypes.length)) {
-          exists.allowedMediaTypes = s.allowedMediaTypes;
-          modified = true;
-        }
-        if (!exists.screenName || exists.screenName !== s.screenName) {
-          exists.screenName = s.screenName;
-          modified = true;
-        }
-        if (modified) await exists.save();
-      }
+    const existing = await ScreenMedia.find({}, { screenId: 1 }).lean();
+    const existingSet = new Set(existing.map((e) => e.screenId));
+    const toInsert = DEFAULT_SCREENS.filter((s) => !existingSet.has(s.screenId));
+    if (toInsert.length > 0) {
+      await ScreenMedia.insertMany(toInsert, { ordered: false }).catch(() => {});
     }
+    isSeeded = true;
   } catch (err) {
     console.error('[ScreenMedia] Seed error:', err.message);
   }
@@ -241,7 +259,7 @@ const normalizeScreenId = (rawId) => {
 router.get('/', async (req, res) => {
   try {
     await ensureScreensSeeded();
-    const screens = await ScreenMedia.find({}).sort({ isRestricted: 1, createdAt: 1 });
+    const screens = await ScreenMedia.find({}, { 'lottieConfig.rawJson': 0 }).sort({ isRestricted: 1, createdAt: 1 }).lean();
     res.json({ success: true, screens });
   } catch (error) {
     console.error('Error fetching screen media list:', error);
@@ -254,7 +272,7 @@ router.get('/:screenId', async (req, res) => {
   try {
     await ensureScreensSeeded();
     const sid = normalizeScreenId(req.params.screenId);
-    let screen = await ScreenMedia.findOne({ screenId: sid });
+    let screen = await ScreenMedia.findOne({ screenId: sid }, { 'lottieConfig.rawJson': 0 });
     if (!screen) {
       const defaultDef = DEFAULT_SCREENS.find((s) => s.screenId === sid);
       if (defaultDef) {
@@ -288,7 +306,7 @@ router.post('/:screenId/upload', upload.single('mediaFile'), async (req, res) =>
       return res.status(400).json({ success: false, message: 'Please provide a file to upload' });
     }
 
-    let screen = await ScreenMedia.findOne({ screenId: sid });
+    let screen = await ScreenMedia.findOne({ screenId: sid }, { 'lottieConfig.rawJson': 0 });
     if (!screen) {
       const defaultDef = DEFAULT_SCREENS.find((s) => s.screenId === sid);
       screen = await ScreenMedia.create(defaultDef || {
@@ -305,8 +323,10 @@ router.post('/:screenId/upload', upload.single('mediaFile'), async (req, res) =>
     const ext = path.extname(originalName).toLowerCase();
     const mimetype = (req.file.mimetype || '').toLowerCase();
 
-    const isLottie = ext === '.json' || ext === '.lottie' || mimetype.includes('json');
-    const isImage = /jpeg|jpg|png|webp|jfif|avif|heic|gif|bmp/i.test(ext) || mimetype.startsWith('image/');
+    // Check if buffer is a zip (.lottie) archive by magic bytes (PK / 0x04034b50)
+    const isZipArchive = req.file.buffer && req.file.buffer.length > 4 && req.file.buffer.readUInt32LE(0) === 0x04034b50;
+    const isLottie = ext === '.json' || ext === '.lottie' || mimetype.includes('json') || isZipArchive;
+    const isImage = !isLottie && (/jpeg|jpg|png|webp|jfif|avif|heic|gif|bmp/i.test(ext) || mimetype.startsWith('image/'));
 
     if (!isLottie && !isImage) {
       return res.status(400).json({
@@ -317,33 +337,63 @@ router.post('/:screenId/upload', upload.single('mediaFile'), async (req, res) =>
 
     let lottieConfig = screen.lottieConfig || { speed: 1.0, loop: true, autoplay: true, rawJson: null };
     let mediaType = isLottie ? 'LOTTIE' : 'IMAGE';
+    let fileBufferToSave = req.file.buffer;
+    let fileExtToSave = ext;
 
-    // Validate Lottie JSON structure if file is JSON
-    if (ext === '.json' || mimetype.includes('json')) {
-      try {
-        const jsonContent = JSON.parse(req.file.buffer.toString('utf8'));
-        if (typeof jsonContent !== 'object' || jsonContent === null) {
-          throw new Error('Root JSON structure must be an object');
+    if (isLottie) {
+      fileExtToSave = '.json';
+      if (isZipArchive || ext === '.lottie') {
+        // Extract animation JSON from .lottie zip archive
+        try {
+          const extractedJson = extractJsonFromDotLottie(req.file.buffer);
+          if (!extractedJson) {
+            throw new Error('No animation JSON found inside .lottie package');
+          }
+          fileBufferToSave = Buffer.from(JSON.stringify(extractedJson), 'utf8');
+        } catch (unzipErr) {
+          return res.status(400).json({
+            success: false,
+            message: `Invalid .lottie file: ${unzipErr.message}. Please upload a valid Lottie animation.`,
+          });
         }
-        lottieConfig.rawJson = jsonContent;
-      } catch (jsonErr) {
-        return res.status(400).json({
-          success: false,
-          message: `Invalid Lottie JSON: ${jsonErr.message}. Please upload a valid Lottie animation file.`,
-        });
+      } else {
+        // Validate JSON structure
+        try {
+          const jsonContent = JSON.parse(req.file.buffer.toString('utf8'));
+          if (typeof jsonContent !== 'object' || jsonContent === null) {
+            throw new Error('Root JSON structure must be an object');
+          }
+        } catch (jsonErr) {
+          return res.status(400).json({
+            success: false,
+            message: `Invalid Lottie JSON: ${jsonErr.message}. Please upload a valid Lottie animation file.`,
+          });
+        }
       }
+      // CRITICAL: Never store massive multi-megabyte JSON in MongoDB document!
+      // The animation is saved to disk as a static JSON file in uploads/ and fetched by clients via lottieUrl.
+      lottieConfig.rawJson = null;
     }
 
     // Save file to disk
     const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
-    const filename = `screen-${sid.toLowerCase()}-${uniqueSuffix}${ext}`;
+    const filename = `screen-${sid.toLowerCase()}-${uniqueSuffix}${fileExtToSave}`;
     const destinationPath = path.join(uploadDir, filename);
-    fs.writeFileSync(destinationPath, req.file.buffer);
+    fs.writeFileSync(destinationPath, fileBufferToSave);
 
     const mediaUrl = `/uploads/${filename}`;
     const nextVersion = (screen.version || 1) + 1;
+    const oldImageUrl = screen.imageUrl;
 
     if (mediaType === 'IMAGE') {
+      // Remove previous image file from disk to prevent storage leaks and guarantee fresh replace
+      if (oldImageUrl && oldImageUrl !== mediaUrl) {
+        try {
+          const oldFile = path.basename(oldImageUrl.split('?')[0]);
+          const oldPath = path.join(uploadDir, oldFile);
+          if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+        } catch (_) {}
+      }
       screen.imageUrl = mediaUrl;
       screen.mediaUrl = mediaUrl;
       if (screen.lottieUrl) {
@@ -352,6 +402,14 @@ router.post('/:screenId/upload', upload.single('mediaFile'), async (req, res) =>
         screen.currentMediaType = 'IMAGE';
       }
     } else if (mediaType === 'LOTTIE') {
+      const oldLottieUrl = screen.lottieUrl;
+      if (oldLottieUrl && oldLottieUrl !== mediaUrl) {
+        try {
+          const oldFile = path.basename(oldLottieUrl.split('?')[0]);
+          const oldPath = path.join(uploadDir, oldFile);
+          if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+        } catch (_) {}
+      }
       screen.lottieUrl = mediaUrl;
       if (!screen.imageUrl) {
         screen.mediaUrl = mediaUrl;
@@ -479,7 +537,7 @@ router.put('/:screenId', async (req, res) => {
       });
     }
 
-    let screen = await ScreenMedia.findOne({ screenId: sid });
+    let screen = await ScreenMedia.findOne({ screenId: sid }, { 'lottieConfig.rawJson': 0 });
     if (!screen) {
       const defaultDef = DEFAULT_SCREENS.find((s) => s.screenId === sid);
       screen = await ScreenMedia.create(defaultDef || {
@@ -530,7 +588,7 @@ router.get('/target/:targetKey', async (req, res) => {
   try {
     await ensureScreensSeeded();
     const sid = normalizeScreenId(req.params.targetKey);
-    let screen = await ScreenMedia.findOne({ screenId: sid });
+    let screen = await ScreenMedia.findOne({ screenId: sid }, { 'lottieConfig.rawJson': 0 });
     if (!screen) {
       const defaultDef = DEFAULT_SCREENS.find((s) => s.screenId === sid);
       if (defaultDef) {
@@ -558,7 +616,7 @@ router.delete('/:screenId', async (req, res) => {
       });
     }
 
-    let screen = await ScreenMedia.findOne({ screenId: sid });
+    let screen = await ScreenMedia.findOne({ screenId: sid }, { 'lottieConfig.rawJson': 0 });
     if (!screen) {
       const defaultDef = DEFAULT_SCREENS.find((s) => s.screenId === sid);
       screen = await ScreenMedia.create(defaultDef || {
@@ -573,18 +631,34 @@ router.delete('/:screenId', async (req, res) => {
 
     const targetType = String(req.query.type || req.query.mediaType || 'ALL').toUpperCase();
 
-    // Also remove matching Banner from Banner collection
+    // Also remove matching Banner from Banner collection and emit socket for real-time deletion
     if (targetType === 'IMAGE' || targetType === 'ALL') {
       try {
         const Banner = require('../models/Banner');
         const imgToDelete = screen.imageUrl || screen.mediaUrl;
         if (imgToDelete) {
+          const oldBanners = await Banner.find({
+            $or: [
+              { imageUrl: imgToDelete },
+              { imageUrl: imgToDelete.startsWith('/') ? imgToDelete : `/${imgToDelete}` }
+            ]
+          }).lean();
+
           await Banner.deleteMany({
             $or: [
               { imageUrl: imgToDelete },
               { imageUrl: imgToDelete.startsWith('/') ? imgToDelete : `/${imgToDelete}` }
             ]
           });
+
+          const io = req.app.get('io') || global.io;
+          if (io && oldBanners.length > 0) {
+            oldBanners.forEach((b) => {
+              io.emit('banner_deleted', b._id);
+              io.emit('banner_change', { type: 'delete', id: b._id, banner: b });
+            });
+            console.log(`📡 [Socket Emit] banner_deleted broadcasted for ${oldBanners.length} banners`);
+          }
         }
       } catch (bErr) {
         console.warn('Note deleting linked banner:', bErr.message);

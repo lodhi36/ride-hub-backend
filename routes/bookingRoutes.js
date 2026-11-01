@@ -7,6 +7,7 @@ const { optionalProtect, protect, protectOrRestaurant } = require('../middleware
 router.use(optionalProtect);
 
 // Booking Routes
+router.post('/validate-friend-delivery', bookingController.validateFriendDelivery);
 router.post('/', bookingController.createBooking);
 router.post('/create', bookingController.createBooking);
 router.post('/request', bookingController.createBooking);

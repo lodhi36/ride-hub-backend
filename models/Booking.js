@@ -277,7 +277,12 @@ const bookingSchema = new mongoose.Schema(
       type: String,
       default: '',
     },
-    // ── Order For Someone Else (Part F Requirement 14) ──
+    // ── Order For Someone Else (Part F Requirement 14 & Friend Delivery) ──
+    orderType: {
+      type: String,
+      enum: ['SELF', 'SOMEONE_ELSE'],
+      default: 'SELF',
+    },
     isOrderingForSomeoneElse: {
       type: Boolean,
       default: false,
@@ -305,6 +310,18 @@ const bookingSchema = new mongoose.Schema(
     recipientLongitude: {
       type: Number,
       default: null,
+    },
+    recipientZoneId: {
+      type: String,
+      default: null,
+    },
+    calculatedRoadDistance: {
+      type: Number,
+      default: 0,
+    },
+    allowedDeliveryRadius: {
+      type: Number,
+      default: 5,
     },
     // Address change audit trail (Part F Requirement 15)
     addressChangeHistory: [

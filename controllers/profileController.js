@@ -432,8 +432,16 @@ const updateProfile = async (req, res, next) => {
     if (req.body.partnerType !== undefined) {
       user.partnerType = String(req.body.partnerType).trim().toUpperCase();
     }
-    if (req.body.categoryName !== undefined) {
-      user.categoryName = String(req.body.categoryName).trim();
+    if (req.body.categoryName !== undefined || req.body.businessCategoryName !== undefined) {
+      const catVal = String(req.body.categoryName || req.body.businessCategoryName).trim();
+      user.categoryName = catVal;
+      user.businessCategoryName = catVal;
+    }
+    if (req.body.category !== undefined) {
+      user.category = req.body.category;
+    }
+    if (req.body.businessCategoryId !== undefined) {
+      user.businessCategoryId = req.body.businessCategoryId;
     }
     if (req.body.supplierPhotos !== undefined) {
       let photosArr = [];
