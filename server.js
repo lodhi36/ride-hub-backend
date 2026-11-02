@@ -491,6 +491,7 @@ app.use('/api/live', require('./routes/liveRoutes'));
 app.use('/api/admin', require('./routes/adminRoutes'));
 app.use(['/api/banner', '/api/banners', '/banner', '/banners'], require('./routes/bannerRoutes'));
 app.use('/api/earnings', require('./routes/earningsRoutes'));
+app.use(['/api/partner', '/partner'], require('./routes/partnerRoutes'));
 app.use('/api/cashfree', require('./routes/cashfreeRoutes'));
 app.use('/api/payment', require('./routes/razorpayRoutes'));
 app.use('/api/razorpay', require('./routes/razorpayRoutes'));

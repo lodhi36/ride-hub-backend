@@ -1800,6 +1800,9 @@ exports.updateBookingStatus = async (req, res) => {
       if (status === 'COMPLETED' || status === 'SERVICE_COMPLETED' || status === 'DELIVERED') {
         booking.deliveryStatus = 'DELIVERED';
         booking.riderStatus = 'DELIVERED';
+        if (!booking.completedAt) {
+          booking.completedAt = new Date();
+        }
       } else if (status === 'OUT_FOR_DELIVERY' || status === 'PICKED_UP' || status === 'FOOD_PICKED_UP') {
         booking.deliveryStatus = 'OUT_FOR_DELIVERY';
         booking.riderStatus = 'OUT_FOR_DELIVERY';

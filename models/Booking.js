@@ -567,6 +567,11 @@ const bookingSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    completedAt: {
+      type: Date,
+      default: null,
+      index: true,
+    },
     totalDeliveryDurationMinutes: {
       type: Number,
       default: null,
@@ -731,4 +736,8 @@ bookingSchema.index({ supplierId: 1, status: 1, createdAt: -1 });
 bookingSchema.index({ scheduledDate: 1 });
 bookingSchema.index({ deliveryStatus: 1 });
 bookingSchema.index({ deliveryStatus: 1, riderId: 1, status: 1 });
+bookingSchema.index({ supplierId: 1, status: 1, completedAt: -1 });
+bookingSchema.index({ restaurantId: 1, status: 1, completedAt: -1 });
+bookingSchema.index({ partnerId: 1, status: 1, completedAt: -1 });
+bookingSchema.index({ providerId: 1, status: 1, completedAt: -1 });
 module.exports = mongoose.model('Booking', bookingSchema);
