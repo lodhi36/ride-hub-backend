@@ -105,14 +105,19 @@ router.post('/', upload.single('image'), compressImage, async (req, res) => {
         if (Array.isArray(parsed)) {
           updateData.subcategories = parsed
             .filter(s => s && s.name && String(s.name).trim())
-            .map(s => ({
-              name: String(s.name).trim(),
-              price: Number(s.price) || 199,
-              isActive: s.isActive !== false,
-              description: s.description || '',
-              icon: s.icon || 'sparkles-outline',
-              image: s.image || ''
-            }));
+            .map(s => {
+              const subObj = {
+                name: String(s.name).trim(),
+                price: Number(s.price) || 199,
+                isActive: s.isActive !== false,
+                description: s.description || '',
+                icon: s.icon || 'sparkles-outline',
+                image: s.image || '',
+                demographic: s.demographic || 'All'
+              };
+              if (s._id) subObj._id = s._id;
+              return subObj;
+            });
         }
       } catch (e) {
         console.error('Failed to parse subcategories JSON:', e.message);
@@ -163,14 +168,19 @@ router.put('/:id', upload.single('image'), compressImage, async (req, res) => {
         if (Array.isArray(parsed)) {
           updateData.subcategories = parsed
             .filter(s => s && s.name && String(s.name).trim())
-            .map(s => ({
-              name: String(s.name).trim(),
-              price: Number(s.price) || 199,
-              isActive: s.isActive !== false,
-              description: s.description || '',
-              icon: s.icon || 'sparkles-outline',
-              image: s.image || ''
-            }));
+            .map(s => {
+              const subObj = {
+                name: String(s.name).trim(),
+                price: Number(s.price) || 199,
+                isActive: s.isActive !== false,
+                description: s.description || '',
+                icon: s.icon || 'sparkles-outline',
+                image: s.image || '',
+                demographic: s.demographic || 'All'
+              };
+              if (s._id) subObj._id = s._id;
+              return subObj;
+            });
         }
       } catch (e) {
         console.error('Failed to parse subcategories JSON:', e.message);
@@ -185,7 +195,23 @@ router.put('/:id', upload.single('image'), compressImage, async (req, res) => {
       updateData.image = req.body.image;
     }
 
-    const category = await Category.findByIdAndUpdate(req.params.id, updateData, { new: true });
+    const category = await Category.findById(req.params.id);
+    if (!category) {
+      return res.status(404).json({ success: false, message: 'Category not found' });
+    }
+    if (updateData.name) category.name = updateData.name.trim();
+    if (updateData.description !== undefined) category.description = updateData.description;
+    if (updateData.icon) category.icon = updateData.icon;
+    if (updateData.iconColor) category.iconColor = updateData.iconColor;
+    if (updateData.bgColor) category.bgColor = updateData.bgColor;
+    if (updateData.startingPrice !== undefined) category.startingPrice = Number(updateData.startingPrice);
+    if (updateData.estimatedTime) category.estimatedTime = updateData.estimatedTime;
+    if (updateData.isActive !== undefined) category.isActive = updateData.isActive;
+    if (updateData.image !== undefined) category.image = updateData.image;
+    if (updateData.subcategories !== undefined) {
+      category.subcategories = updateData.subcategories;
+    }
+    await category.save();
     
     const adminController = require('../controllers/adminController');
     const io = req.app.get('io') || global.io || (adminController.getIO ? adminController.getIO() : null);
