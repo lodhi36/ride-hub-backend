@@ -161,12 +161,18 @@ exports.uploadBanner = async (req, res) => {
     const outputPath = path.join(uploadDir, filename);
 
     // Automatically optimize and compress with Sharp (max 1200px width, WebP quality 85)
-    await sharp(req.file.buffer)
+    const compressedBuffer = await sharp(req.file.buffer)
       .resize({ width: 1200, withoutEnlargement: true })
       .webp({ quality: 85, effort: 4 })
-      .toFile(outputPath);
+      .toBuffer();
 
-    const imageUrl = `/uploads/${filename}`;
+    fs.writeFileSync(outputPath, compressedBuffer);
+
+    // Save as Data URI if <= 150KB so it permanently survives cloud server spin-downs and ephemeral disks
+    let imageUrl = `/uploads/${filename}`;
+    if (compressedBuffer.length <= 150 * 1024) {
+      imageUrl = `data:image/webp;base64,${compressedBuffer.toString('base64')}`;
+    }
     
     const banner = await Banner.create({
       imageUrl,

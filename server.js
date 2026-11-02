@@ -150,7 +150,7 @@ app.use((req, res, next) => {
 app.use('/uploads', staticUploadsMiddleware);
 app.use('/api/uploads', staticUploadsMiddleware);
 
-// Guaranteed Static Fallback: sendFile or return 404
+// Guaranteed Static Fallback: sendFile from local disk or seamlessly redirect to GitHub Raw CDN
 app.get(['/uploads/*', '/api/uploads/*'], (req, res, next) => {
   const relPath = req.params[0];
   if (!relPath) return next();
@@ -159,7 +159,9 @@ app.get(['/uploads/*', '/api/uploads/*'], (req, res, next) => {
   if (fs.existsSync(filePath)) {
     return res.sendFile(filePath);
   }
-  return res.status(404).send('File not found');
+  // High-availability CDN Fallback: Render ephemeral disk may not contain static git assets
+  const cdnUrl = `https://raw.githubusercontent.com/lodhi36/sachin24/main/uploads/${relPath}`;
+  return res.redirect(302, cdnUrl);
 });
 
 // Middleware placeholder for DB connection status check

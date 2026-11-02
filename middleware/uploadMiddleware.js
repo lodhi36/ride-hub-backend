@@ -103,6 +103,10 @@ const compressImage = async (req, res, next) => {
       file.path = outputPath;
       file.size = outputBuffer.length;
       file.mimetype = finalMimeType;
+      // High-availability Data URI for cloud databases (survives any ephemeral cloud restarts)
+      if (outputBuffer.length <= 150 * 1024) {
+        file.dataUri = `data:${finalMimeType};base64,${outputBuffer.toString('base64')}`;
+      }
     }
 
     next();

@@ -65,7 +65,7 @@ router.post('/upload-image', upload.single('image'), compressImage, (req, res) =
     if (!req.file) {
       return res.status(400).json({ success: false, message: 'No image uploaded' });
     }
-    const imageUrl = `/uploads/${req.file.filename}`;
+    const imageUrl = req.file.dataUri || `/uploads/${req.file.filename}`;
     res.json({ success: true, imageUrl, filename: req.file.filename });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -85,7 +85,7 @@ router.post('/', upload.single('image'), compressImage, async (req, res) => {
 
     let imageUrl = undefined;
     if (req.file) {
-      imageUrl = `/uploads/${req.file.filename}`;
+      imageUrl = req.file.dataUri || `/uploads/${req.file.filename}`;
     }
 
     const updateData = {
@@ -178,7 +178,7 @@ router.put('/:id', upload.single('image'), compressImage, async (req, res) => {
     }
 
     if (req.file) {
-      updateData.image = `/uploads/${req.file.filename}`;
+      updateData.image = req.file.dataUri || `/uploads/${req.file.filename}`;
     } else if (req.body.removeImage === 'true' || req.body.removeImage === true || req.body.image === '') {
       updateData.image = '';
     } else if (req.body.image !== undefined) {
